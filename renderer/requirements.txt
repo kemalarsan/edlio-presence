@@ -1,0 +1,29 @@
+# renderer/requirements.txt
+# Python 3.10 — matches infra/Dockerfile
+#
+# CPU-safe subset (for stub mode and local development without GPU):
+#   numpy, opencv-python, Pillow
+#
+# GPU mode adds (installed in Docker container via infra/Dockerfile):
+#   torch==2.0.1+cu118, torchvision==0.15.2, torchaudio==2.0.2
+#   diffusers==0.30.2, transformers==4.39.2
+#   librosa, soundfile
+#   mmcv==2.0.1, mmdet==3.1.0, mmpose==1.1.0  (from infra)
+#
+# This file lists the renderer-specific deps.
+# The full image deps are in infra/Dockerfile.
+
+# Core (always required)
+numpy>=1.23,<2.0
+opencv-python>=4.8
+
+# Audio processing
+librosa>=0.10
+soundfile>=0.12
+
+# Whisper / transformers (for AudioProcessor)
+transformers>=4.39.2,<5.0
+einops>=0.7
+
+# Optional: pytest for running tests
+pytest>=7.0

@@ -1,0 +1,44 @@
+# Edlio Presence Layer — audio/ Python dependencies
+# Track C: Phoneme/Viseme extraction pipeline
+# Last updated: 2026-04-30
+# Python: 3.10+ required (3.14 tested)
+# Platform: CPU-only (no GPU deps)
+
+# ─── Core inference ────────────────────────────────────────────────────────────
+# faster-whisper: CTranslate2-based Whisper, 2-4x faster than openai-whisper on CPU
+# Uses int8 quantization — tiny model (~75MB) handles extraction in <30ms/s audio
+faster-whisper>=1.0.3
+
+# ─── Audio I/O ─────────────────────────────────────────────────────────────────
+librosa>=0.10.0
+soundfile>=0.12.0
+
+# ─── Numerics ──────────────────────────────────────────────────────────────────
+numpy>=1.24.0
+
+# ─── Optional: pronouncing (CMU dict) ─────────────────────────────────────────
+# If installed, improves phoneme accuracy for uncommon words.
+# Falls back to hardcoded mini-dict if not available.
+# pronouncing>=0.2.0
+
+# ─── Optional: MuseTalk-compatible feature extraction ─────────────────────────
+# Required ONLY for extract_musetalk_features() (Track A integration).
+# These are NOT needed for phoneme/viseme extraction.
+# Install separately if you need MuseTalk feature output:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+#   pip install transformers>=4.40 einops>=0.7
+# torch>=2.1.0  (CPU wheel, see above)
+# transformers>=4.40.0
+# einops>=0.7.0
+
+# ─── Setup notes ──────────────────────────────────────────────────────────────
+# 1. Create venv:    python3 -m venv .venv && source .venv/bin/activate
+# 2. Install:        pip install -r requirements.txt
+# 3. Run test:       python test_sample.py /path/to/audio.wav
+#
+# System dep: ffmpeg (for audio conversion in test_sample.py self-test mode)
+#   macOS: brew install ffmpeg
+#   Linux: apt-get install ffmpeg
+#
+# Model auto-download: faster-whisper downloads whisper-tiny (~75MB) to
+# ~/.cache/huggingface/hub/ on first run. Set HF_HOME to override.

@@ -1,0 +1,3 @@
+[submodule "renderer/muse_talk_vendor"]
+	path = renderer/muse_talk_vendor
+	url = https://github.com/TMElyralab/MuseTalk.git
