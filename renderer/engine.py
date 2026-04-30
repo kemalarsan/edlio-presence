@@ -238,6 +238,8 @@ class _MuseTalkRenderer:
         # Move MuseTalk models to device + dtype
         self.vae.vae.to(self.device, dtype=self.weight_dtype)
         self.unet.model.to(self.device, dtype=self.weight_dtype)
+        # Positional encoding also needs to match weight dtype (contains learnable params)
+        self.pe.to(self.device, dtype=self.weight_dtype)
 
         logger.info("MuseTalk models loaded on %s (fp16=%s)", self.device, self.use_float16)
 
