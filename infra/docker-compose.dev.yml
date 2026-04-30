@@ -1,0 +1,41 @@
+# docker-compose.dev.yml — Local dev (requires a CUDA-capable GPU on the host)
+#
+# Usage:
+#   docker compose -f infra/docker-compose.dev.yml up --build
+#
+# If you don't have a local GPU, skip this and use infra/runpod-launch.sh to
+# spin up a RunPod persistent pod instead.
+
+version: "3.9"
+
+services:
+  renderer:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile
+    image: edlio-presence:dev
+    container_name: edlio-presence-dev
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+      # Hugging Face token — set in .env or export before running
+      - HF_TOKEN=${HF_TOKEN:-}
+      # Where model weights live on the host (bind-mounted for fast iteration)
+      - MODEL_DIR=/models
+    volumes:
+      # Mount local models dir so you don't re-download on every rebuild
+      - ${HOST_MODEL_DIR:-./models}:/models
+      # Mount repo for live code edits
+      - ..:/workspace
+    ports:
+      # Renderer gRPC/HTTP — adjust when Track A defines the actual port
+      - "8765:8765"
+    command: python /workspace/hello-gpu.py
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
