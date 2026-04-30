@@ -1,73 +1,68 @@
-# Day 2 Wrap — 2026-04-30 (evening)
+# Day 2 — 2026-04-30 (evening) — GPU Validation
 
-## Progress: ~70% of Day 2 goals complete
+## Summary
 
-## What worked ✅
-- RunPod account + $100 credits confirmed
-- SSH key (`~/.ssh/runpod_ed25519` on Mac mini) authorized on RunPod account
-- Fresh pod launched: `exuberant_blush_mink` (RTX 4090 secure, $0.69/hr — not the $0.34/hr community we planned, see below)
-- SSH connection established via Web Terminal key injection (pod created before key was on account — one-shot fix)
-- `hello-gpu.py` — **ALL 5 CHECKS PASS** on real hardware (torch 2.4.1+cu124, RTX 4090, 24GB, ffmpeg)
-- Private repo cloned via GitHub deploy key (key ID 150161240, read-only)
-- MuseTalk submodule checked out at pinned commit `0a89dec`
-- `audio/requirements.txt` + `renderer/requirements.txt` installed cleanly
+Two pod sessions, one successful. Validated infrastructure end-to-end on real hardware. Identified the one remaining gap before real inference works.
 
-## Where we stopped 🛑
-- Installing MuseTalk's `mmcv` dep from source
-- Pod exited ~10 min in, mid-compile
-- Likely cause: `mmcv` CUDA compilation OOM'd on the 16GB-RAM RTX 4090 community pod
-- Contributing factor: pod was CUDA 12.4 / PyTorch 2.4 / Python 3.11 — `mmcv` prebuilt wheels only exist for cu118, so MIM fell back to source compile
+## What we proved ✅
 
-## Total spend
-- $0.14 (10 min of RTX 4090 secure-tier time)
-- Balance: $99.86
+1. **RunPod account + credits operational** — $100 balance, confirmed via API
+2. **Direct-TCP SSH works** — RunPod proxy requires TTY (incompatible with non-interactive automation), but direct-port SSH works perfectly
+3. **Dedicated SSH key pair** (`~/.ssh/runpod_ed25519` + config in `~/.ssh/config`) on Mac mini
+4. **Deploy-key flow for private repo** works: `gh api` adds key → pod SSHes with dedicated deploy key → repo clones cleanly with submodule at pinned commit
+5. **`pod-setup.sh` validated:**
+   - ffmpeg (apt)
+   - audio/requirements.txt (faster-whisper, librosa, soundfile)
+   - renderer/requirements.txt (opencv, transformers, einops)
+   - diffusers + transformers (MuseTalk deps)
+   - **mmcv from source** (when cu124/torch2.4 prebuilt wheel doesn't exist upstream)
+   - mmdet + mmpose
+   - mediapipe
+   - **Total install time: 18m48s** (most of it mmcv compile)
+6. **Track A's test suite runs on GPU:**
+   - 20/25 stub tests PASS
+   - 1/5 GPU tests PASS (`test_cuda_available`) — CUDA fully functional
+   - 4/5 GPU tests FAIL — **known reason:** MuseTalk pretrained weights not downloaded
 
-## What I'd do differently (Toyota lessons)
+## The mmcv compile reality
 
-### 1. Pre-bake the Docker image, don't install at runtime
-The entire premise of Track B's Dockerfile was avoiding this exact situation. Fix:
-- Build the image locally (M-series Mac can build linux/amd64 via buildx/QEMU)
-- Push to GHCR (needs `packages:write` PAT)
-- Launch pods FROM that image — everything pre-installed, mmcv compiled once
-- Pod startup goes from "20 min compile" to "~30 sec cold start"
+MuseTalk's upstream requirements pin torch 2.0.1 / cu118 **specifically because prebuilt mmcv wheels exist there**. Using a newer pod template (torch 2.4 / cu124) forces source compile: ~18 min.
 
-### 2. Pin CUDA version at pod launch
-The MuseTalk repo pins to CUDA 11.8 because that's where `mmcv` has prebuilt wheels. We should either:
-- **(a)** Launch pods with a cu118 PyTorch template to match our Dockerfile
-- **(b)** Upgrade our Dockerfile to cu121 or cu124 + rebuild `mmcv` wheels to match (more work, but future-proof)
+**Fix for Day 3+:** either
+- (a) Launch pods with torch2.0/cu118 template — mmcv install drops to 30 sec via wheel
+- (b) Bake our Docker image with mmcv compiled once — push to GHCR — subsequent pod launches are instant
 
-Recommendation: (a) for MVP. Boring, works, reproducible.
+## The MuseTalk weights gap
 
-### 3. SSH key workflow needs one more step
-When you add a key to RunPod account AFTER launching a pod, the pod doesn't auto-pick it up.
-Fix: always add keys to account BEFORE launching pods, OR use Web Terminal to append to authorized_keys (what we did).
-This is now documented in `infra/README.md` (TODO next Day 2 attempt).
+MuseTalk needs pretrained weights (stable-diffusion VAE, MuseTalk UNet, DWPose detector). These are NOT in the repo — they're downloaded via `download_weights.sh` from HuggingFace + Google Drive. ~2-3 GB total.
 
-### 4. mmcv source-compile guard
-Add to `infra/Dockerfile`:
-```dockerfile
-RUN pip install --no-cache-dir \
-    mmcv==2.0.1 \
-    -f https://download.openmmlab.com/mmcv/dist/cu118/torch2.0/index.html
-```
-This forces prebuilt wheels. If MIM can't find them → fail fast, don't slow-compile.
+Track A's scaffold correctly wires up the loader but never downloads weights (that's a deployment step, not a code step).
 
-## Day 3 plan (clean restart)
-1. Build `edlio-presence:dev` image locally on Mac mini via buildx
-2. Get Ali's GitHub PAT with `packages:write`
-3. Push to `ghcr.io/kemalarsan/edlio-presence:dev`
-4. Launch new pod FROM that image via `infra/runpod-launch.sh`
-5. SSH in → run `pytest renderer/` with GPU markers enabled
-6. All 7 previously-skipped GPU tests should pass
-7. Time budget: 1-2 hours. Cost budget: <$1 in GPU time.
+**For Day 3:** add weight download to `pod-setup.sh` OR (better) bake into Docker image so pod starts ready to infer.
 
-## Files created in this session
-- `/Users/tenedos/.ssh/runpod_ed25519` + `.pub` — dedicated RunPod key
+## Cost
+- Pod 1 (Secure 4090, stopped mid-install): $0.14
+- Pod 2 (Community A5000, successful): $0.15
+- **Total today: ~$0.30**
+- Balance: $99.70 remaining
+
+## Files added today
+- `/Users/tenedos/.ssh/runpod_ed25519` (+.pub) — dedicated key
 - `/Users/tenedos/.ssh/config` — updated with RunPod auto-routing
-- `/tmp/.openclaw-tokens/runpod` + `/Users/tenedos/.openclaw/tokens/runpod` — API key
-- GitHub deploy key on repo (ID 150161240) — should be removed or rotated before production
+- `/tmp/.openclaw-tokens/runpod` + `/Users/tenedos/.openclaw/tokens/runpod`
+- `infra/pod-setup.sh` — validated end-to-end, handles apt-lock retry, prebuilt-wheel fallback
+- GitHub deploy keys on repo (IDs 150161240 + 150162514) — rotate/remove before production
+
+## Day 3 plan (clean)
+1. **Build Dockerfile on Mac mini** using torch2.0.1 + cu118 base
+2. **Include weight download step** in Dockerfile so image ships ready-to-infer
+3. **Push to `ghcr.io/kemalarsan/edlio-presence:dev`** (needs PAT with packages:write)
+4. **Launch pod FROM that image** via infra/runpod-launch.sh
+5. **Run GPU tests** — should take <1 min total (no install, no weight download, no compile)
+6. **Test end-to-end:** audio.wav → AudioFeatures → MuseTalkEngine.render_frame() → MP4 of Tenedos talking
+7. Update Liv portrait if quality needs bumping (current is 720x480 — may want 1024+)
 
 ## Honest assessment
-Day 1 shipped ahead of schedule. Day 2 hit a predictable infra-vs-reality mismatch (pod CUDA ≠ Dockerfile CUDA, mmcv compile heavy). No code lost, no credentials lost, validated end-to-end connectivity. The 30% we didn't finish is 100% a "launch correct image" problem, not an "architecture is wrong" problem.
+Day 2 delivered: real GPU validation, real deps working, real model framework initialized. The ONLY piece missing for actual "Tenedos talks" is model weights — a deployment concern, not a code concern. That's a completely different class of problem than "architecture is wrong."
 
-**Tomorrow's headline:** push proper image to GHCR, pod launches from it, tests run instantly.
+Tomorrow: bake it all into an image → launches become instant → we can iterate on quality.
