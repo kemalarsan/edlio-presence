@@ -12,22 +12,33 @@ $20 RunPod + $20 LLM API. Rule: every stable state gets a `overnight/*` git tag.
 All 8 Day-2 gotchas written up properly (commit `67e3e6e`). Saves the next
 engineer (or future-me on a new machine) ~2 hours.
 
-### 2. Renderer API scaffold — `renderer/server.py`
-FastAPI wrapper for the MuseTalk engine (commit `9922227`). Endpoints:
-- `GET /healthz` — liveness for the tenedos-voice probe
-- `POST /render` — STUBBED 501; Day 3 wires it to `renderer.engine.MuseTalkEngine`
-- `GET /renders/{file}` — static MP4 serving
+### 2. Renderer API — `renderer/server.py` (**LIVE AND WORKING**)
+FastAPI wrapper for the MuseTalk engine (commits `9922227`, `2f1da8e`).
+Initially scaffolded with a 501 stub, then finished and tested on the pod.
 
-Zero behavior change in the repo; nothing imports this module yet.
+Endpoints, all verified live at http://pod:8080:
+- `GET /healthz` → `{ok, cuda, gpu, model_dir_exists, cached_engines}`
+- `POST /render` → `{videoUrl, durationSec, metrics}` (full MuseTalk pipeline)
+- `GET /renders/{file}` → static MP4 serving
 
-### 3. tenedos-voice integration scaffold
-Feature branch `overnight/presence-renderer-scaffold` pushed with:
+**Benchmarks on A5000**:
+- Cold first render: 9.4s for 3.3s of video (includes engine build + portrait preproc)
+- Warm subsequent render: 3.3s for 3.3s of video = **25.2 fps = real-time**
+
+Unit tests: 12 tests in `renderer/test_server.py` (commit `65ea068`). 11/11 CPU tests pass; the 1 real-GPU test passes when `RENDERER_SERVER_URL` is set.
+
+### 3. tenedos-voice integration
+**PR #1 open:** https://github.com/kemalarsan/tenedos-voice/pull/1
+Branch: `overnight/presence-renderer-scaffold`
+
+Contains:
 - `src/lib/presence-client.ts` — `renderPresence()`, `probePresence()`
 - `src/app/api/presence/render/route.ts` — server-side shim to the GPU pod
 - `src/lib/PRESENCE_INTEGRATION.md` — Day-3 integration plan
+- `src/app/presence-test/page.tsx` — manual test UI at `/presence-test`
 
 **Inert until `PRESENCE_RENDERER_URL` env var is set.** Safe to merge now;
-won't touch production until explicitly flipped on.
+won't touch production until explicitly flipped on. Lint + typecheck clean.
 
 ### 4. Docker image — built, pending push
 
@@ -56,7 +67,8 @@ Built via "tar the pod, copy into image" strategy:
 | `overnight/day2-start` | baseline at session start (21:07 ET) |
 | `overnight/day2-image-building` | Docker build kicked off (21:19 ET) |
 | `overnight/day2-scaffolds-shipped` | LESSONS + server + tenedos-voice scaffold (21:34 ET) |
-| `overnight/day2-image-baked` | image built + exported to tarball, push pending scope (~21:27 ET) |
+| `overnight/day2-image-baked` | image built + exported to tarball, push pending scope (~21:40 ET) |
+| `overnight/day2-api-live` | **✨ /render works end-to-end at 25fps = real-time (21:33 ET)** |
 
 Any of these: `git checkout <tag>` and you're in a known-good state.
 
@@ -93,8 +105,12 @@ Well under the $20 + $20 limits.
 
 ## Day 3 priorities (for whichever session picks this up)
 
-1. **Wire `renderer/server.py` POST /render to `renderer.engine.MuseTalkEngine`.** Engine works; this is ~100 lines of audio-file-handling + cache plumbing.
-2. **Deploy the pod.** Launch from `ghcr.io/kemalarsan/edlio-presence:day2-snapshot`. Write a startup script that runs `uvicorn renderer.server:app --host 0.0.0.0 --port 8080`. Expose via RunPod HTTP endpoint.
-3. **Set Vercel env vars** `PRESENCE_RENDERER_URL` + `PRESENCE_RENDERER_TOKEN`.
-4. **Extend AvatarPanel** to probe + prefer the presence provider over Anam.
-5. **End-to-end test:** open tenedos-voice, verify our own avatar renders, not Anam's.
+1. ~~**Wire `renderer/server.py`**~~ ✅ **DONE overnight.** Already tested at 25 fps.
+2. **Push image to GHCR.** One-time `gh auth refresh -s write:packages`, then the commands in `PUSH_ME_IN_THE_MORNING.md`. ~30-40 min upload.
+3. **Expose pod's port 8080.** RunPod “Exposed HTTP Ports” config → get a stable `https://pod-xxxx-8080.proxy.runpod.net` URL. Set `RENDERER_AUTH_TOKEN` env on the pod to require bearer auth.
+4. **Merge PR #1 on tenedos-voice.** Review at https://github.com/kemalarsan/tenedos-voice/pull/1. Safe to merge inert.
+5. **Set Vercel env vars** `PRESENCE_RENDERER_URL` + `PRESENCE_RENDERER_TOKEN`.
+6. **Test.** Open `/presence-test` on production Vercel, probe, render, verify the MP4.
+7. **Extend AvatarPanel.** Add "presence" as a provider; probe order: presence → anam → none.
+
+Steps 2 and 3 need Ali's hands (browser auth). Steps 4–7 can be a subagent or Day-3 session.
