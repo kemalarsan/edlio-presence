@@ -30,7 +30,7 @@ LABEL org.opencontainers.image.licenses="MIT"
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
-    RENDERER_MODEL_DIR=/workspace/edlio-presence/models \
+    RENDERER_MODEL_DIR=/workspace/edlio-presence/renderer/muse_talk_vendor/models \
     HF_HOME=/workspace/.cache/huggingface
 
 # System deps — keep minimal since base image already has most of what we need
