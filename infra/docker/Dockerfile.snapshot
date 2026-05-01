@@ -53,13 +53,18 @@ RUN rm -rf /usr/local/lib/python3.11/dist-packages && \
 WORKDIR /workspace/edlio-presence
 COPY . /workspace/edlio-presence/
 
-# models/ symlink: renderer/muse_talk_vendor/models → /workspace/edlio-presence/models
-# Weights are NOT baked in — fetch_weights.sh pulls them on first boot.
-RUN ln -sf renderer/muse_talk_vendor/models /workspace/edlio-presence/models
-
-# Bootstrap helpers live at infra/docker/ in the repo
+# Bootstrap helpers live at infra/docker/ in the repo.
+# The models/ symlink is created at runtime by entrypoint.sh so it resolves to
+# whichever dir RENDERER_MODEL_DIR points at — useful when a network volume is
+# mounted at the weights path.
 RUN chmod +x /workspace/edlio-presence/infra/docker/entrypoint.sh \
              /workspace/edlio-presence/infra/docker/fetch_weights.sh
 
+# Expose the renderer's HTTP port
+EXPOSE 8080
+
+# Default: run the renderer HTTP server.
+# Override CMD if you need an interactive shell, e.g.:
+#   docker run --rm -it <image> bash
 ENTRYPOINT ["/workspace/edlio-presence/infra/docker/entrypoint.sh"]
-CMD ["bash"]
+CMD ["uvicorn", "renderer.server:app", "--host", "0.0.0.0", "--port", "8080"]

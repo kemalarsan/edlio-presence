@@ -5,14 +5,25 @@
 # Then exec whatever CMD was passed.
 set -euo pipefail
 
-WEIGHT_SENTINEL=/workspace/edlio-presence/renderer/muse_talk_vendor/models/musetalkV15/unet.pth
+MODEL_DIR="${RENDERER_MODEL_DIR:-/workspace/edlio-presence/renderer/muse_talk_vendor/models}"
+WEIGHT_SENTINEL="${MODEL_DIR}/musetalkV15/unet.pth"
 
+# If a network volume is mounted at the model dir, it might have been populated
+# by a previous boot. If not, or the sentinel is missing, fetch all weights.
 if [[ ! -f "${WEIGHT_SENTINEL}" ]]; then
-    echo "[edlio-presence] weights missing, fetching…"
+    echo "[edlio-presence] weights missing at ${MODEL_DIR}, fetching…"
     /workspace/edlio-presence/infra/docker/fetch_weights.sh
 else
-    echo "[edlio-presence] weights already present — skipping fetch"
+    echo "[edlio-presence] weights already present at ${MODEL_DIR} — skipping fetch"
 fi
 
-echo "[edlio-presence] ready. starting: $*"
+# MuseTalk's face_parsing loader hard-codes `./models/...`, so pytest/renderer
+# CWD needs a `models/` symlink pointing at the actual weights dir.
+WORK_DIR=/workspace/edlio-presence
+if [[ ! -e "${WORK_DIR}/models" ]]; then
+    ln -sf "${MODEL_DIR}" "${WORK_DIR}/models"
+fi
+
+cd "${WORK_DIR}"
+echo "[edlio-presence] ready (cwd=$(pwd)). starting: $*"
 exec "$@"
