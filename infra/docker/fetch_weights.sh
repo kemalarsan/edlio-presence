@@ -57,12 +57,12 @@ hf download ByteDance/LatentSync --include "latentsync_syncnet.pt" --local-dir s
 # ─── Face parsing (BiSeNet for mouth masking) ─────────────────────────────────
 echo "[weights] face-parse-bisent…"
 mkdir -p face-parse-bisent
-curl -sfL https://github.com/zllrunning/face-parsing.PyTorch/releases/download/v0.0.1/resnet18-5c106cde.pth \
-     -o face-parse-bisent/resnet18-5c106cde.pth \
-    || echo "[weights] warn: face-parse-bisent resnet fetch failed"
-curl -sfL "https://drive.google.com/uc?id=154JgKpzCPW82qINcVieuPH3fZ2e0P812&export=download" \
-     -o face-parse-bisent/79999_iter.pth \
-    || echo "[weights] warn: face-parse-bisent 79999_iter.pth requires manual download from Google Drive"
+# Mirror on HF has both files — upstream's Google-Drive URL is headless-hostile.
+# (The same mirror is used by the project's download_weights.bat for Windows.)
+hf download ManyOtherFunctions/face-parse-bisent \
+    --include "resnet18-5c106cde.pth" "79999_iter.pth" \
+    --local-dir face-parse-bisent 2>&1 | tail -3 \
+    || echo "[weights] warn: face-parse-bisent fetch from HF mirror failed"
 
 echo "[weights] done:"
 du -sh "${MODELS_DIR}"/*/
