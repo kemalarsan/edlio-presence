@@ -48,6 +48,15 @@ RUN rm -rf /usr/local/lib/python3.11/dist-packages && \
     tar -xzf /tmp/dist-packages.tar.gz -C /usr/local/lib/python3.11 && \
     rm /tmp/dist-packages.tar.gz
 
+# The Day-2 snapshot predates fastapi/uvicorn (we pip-installed them on the
+# live pod AFTER the tarball was taken). Re-install them here so the image
+# is self-sufficient. Pinned to versions compatible with pydantic 2.x already
+# present in the snapshot.
+RUN pip install --no-cache-dir \
+        "fastapi==0.115.6" \
+        "uvicorn[standard]==0.32.1" \
+        "python-multipart==0.0.19"
+
 # Project source — the build context is the repo root.
 # Heavy files (weights, videos, caches) are excluded via .dockerignore.
 WORKDIR /workspace/edlio-presence
