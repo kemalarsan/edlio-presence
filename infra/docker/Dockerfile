@@ -50,8 +50,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 #   diffusers 0.30.2  ← needs hf_hub < 1.0
 #   transformers 4.44.2  ← works with torch 2.4 (no torch.load safety check)
 #   huggingface_hub 0.26.x  ← has `hf` CLI (new) AND `cached_download` (old diffusers path)
-RUN pip install --upgrade pip && \
+RUN pip install --upgrade pip setuptools wheel && \
     pip install "huggingface_hub[cli]==0.26.5"
+
+# `chumpy` (pulled in by mmpose) has a legacy setup.py that imports `pip` in
+# an isolated build environment where pip isn't available. Install it first
+# with --no-build-isolation so it can use the outer env's pip/setuptools.
+RUN pip install --no-build-isolation "chumpy==0.70"
 
 # Project-level python deps. Using the lockfile from a running Day-2 pod.
 COPY infra/docker/requirements-pod.txt /tmp/requirements-pod.txt
