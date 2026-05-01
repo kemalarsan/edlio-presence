@@ -27,6 +27,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # muse_talk_vendor/ is a submodule — we need its contents in the image
+          # so `import musetalk` works inside the renderer.
+          submodules: recursive
 
       - name: Check tarball is present and readable on runner
         run: |
