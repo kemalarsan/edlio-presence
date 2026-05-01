@@ -40,7 +40,22 @@ Contains:
 **Inert until `PRESENCE_RENDERER_URL` env var is set.** Safe to merge now;
 won't touch production until explicitly flipped on. Lint + typecheck clean.
 
-### 4. Docker image — built, pending push
+### 4. Docker image — built, push attempt failed overnight
+
+**Update 2026-05-01 04:12 AM ET:** After Ali granted `write:packages` at ~21:45,
+I tried pushing 4 times over 5 hours. Each attempt uploaded ~3 GB before GHCR
+closed the TCP connection mid-blob with "use of closed network connection".
+Docker push isn't resumable per-blob — it retries the whole blob. Net result:
+27.56 GB uploaded, 16 GB wasted, manifest never landed, package still 404.
+
+**I killed the retry loop at 04:12 AM** to stop burning Comcast upload. The
+tarball is still intact; this just means the image is not yet on GHCR.
+
+**Morning recommendation:** `brew install skopeo` and use `skopeo copy` which
+has real per-blob retry semantics. Full notes in
+`/Users/tenedos/edlio-presence-build/PUSH_ME_IN_THE_MORNING.md`.
+
+
 
 Built via "tar the pod, copy into image" strategy:
 1. Tarred `/usr/local/lib/python3.11/dist-packages` from the working A5000 pod
@@ -69,6 +84,7 @@ Built via "tar the pod, copy into image" strategy:
 | `overnight/day2-scaffolds-shipped` | LESSONS + server + tenedos-voice scaffold (21:34 ET) |
 | `overnight/day2-image-baked` | image built + exported to tarball, push pending scope (~21:40 ET) |
 | `overnight/day2-api-live` | **✨ /render works end-to-end at 25fps = real-time (21:33 ET)** |
+| _(no `day2-image-published` tag)_ | push to GHCR failed; 27.56 GB uploaded but connection drops prevented the manifest from landing. See `PUSH_ME_IN_THE_MORNING.md`. |
 
 Any of these: `git checkout <tag>` and you're in a known-good state.
 
@@ -96,8 +112,10 @@ Well under the $20 + $20 limits.
 
 ## What's ready for Ali to do in the morning (5 min of work)
 
-1. Run: `gh auth refresh -h github.com -s write:packages,read:packages`
-2. Run the 4 commands in `PUSH_ME_IN_THE_MORNING.md` to push the image to GHCR
+1. ~~`gh auth refresh -h github.com -s write:packages`~~ ✅ done overnight.
+2. **The direct docker push failed 4x overnight** (see #4 above). Try
+   `brew install skopeo && skopeo copy docker-archive:/Users/tenedos/edlio-presence-build/edlio-presence-day2-snapshot.tar docker://ghcr.io/kemalarsan/edlio-presence:day2-snapshot` —
+   skopeo retries per blob, unlike docker. OR: defer to a better network.
 3. Review + merge the `overnight/presence-renderer-scaffold` PR on tenedos-voice
 4. Terminate the RunPod pod (image is in GHCR, safety net no longer needed)
 

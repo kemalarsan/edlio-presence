@@ -53,14 +53,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip install --upgrade pip setuptools wheel && \
     pip install "huggingface_hub[cli]==0.26.5"
 
-# `chumpy` (pulled in by mmpose) has a legacy setup.py that imports `pip` in
-# an isolated build environment where pip isn't available. Install it first
-# with --no-build-isolation so it can use the outer env's pip/setuptools.
-RUN pip install --no-build-isolation "chumpy==0.70"
+# Several legacy packages (chumpy, mmcv) have setup.py files that assume
+# `pip`/`pkg_resources` are importable in the build env. Modern pip uses
+# isolated build envs where they aren't. Install them first with
+# --no-build-isolation so they use the outer env's setuptools.
+#
+# Order matters: chumpy < mmcv because they're small and standalone.
+RUN pip install --no-build-isolation "chumpy==0.70" && \
+    pip install --no-build-isolation "mmcv==2.1.0" --no-deps
 
 # Project-level python deps. Using the lockfile from a running Day-2 pod.
+# Pass --no-build-isolation globally as belt-and-suspenders; the base image
+# already has setuptools/wheel, so no isolation is needed.
 COPY infra/docker/requirements-pod.txt /tmp/requirements-pod.txt
-RUN pip install -r /tmp/requirements-pod.txt
+RUN pip install --no-build-isolation -r /tmp/requirements-pod.txt
 
 # Workspace setup
 WORKDIR /workspace/edlio-presence
