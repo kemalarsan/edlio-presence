@@ -44,3 +44,4 @@ pytest-of-root
 .pytest_cache
 .ruff_cache
 .mypy_cache
+assets/test/
