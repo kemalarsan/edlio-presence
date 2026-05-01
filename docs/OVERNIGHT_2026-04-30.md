@@ -42,17 +42,24 @@ won't touch production until explicitly flipped on. Lint + typecheck clean.
 
 ### 4. Docker image — built, push attempt failed overnight
 
-**Update 2026-05-01 04:12 AM ET:** After Ali granted `write:packages` at ~21:45,
-I tried pushing 4 times over 5 hours. Each attempt uploaded ~3 GB before GHCR
-closed the TCP connection mid-blob with "use of closed network connection".
-Docker push isn't resumable per-blob — it retries the whole blob. Net result:
-27.56 GB uploaded, 16 GB wasted, manifest never landed, package still 404.
+**Final update 2026-05-01 07:47 AM ET:** Two push attempts overnight,
+both failed with the same network-level error:
+- `docker push` — 4 retries, 5 hours, died on 3-4 different blobs with
+  "use of closed network connection".
+- `skopeo copy --retry-times 20` — 3.5 hours, parallel blob uploads, same
+  error on blob `a3145e21-8aa7...`.
 
-**I killed the retry loop at 04:12 AM** to stop burning Comcast upload. The
-tarball is still intact; this just means the image is not yet on GHCR.
+**Root cause is network, not tooling.** Something (Comcast and/or GHCR's
+IAD load balancer) closes TCP connections after N minutes of sustained
+blob upload. This Mac mini can't complete an 11 GB push to GHCR from
+behind residential Comcast.
 
-**Morning recommendation:** `brew install skopeo` and use `skopeo copy` which
-has real per-blob retry semantics. Full notes in
+**The image is still safe on disk** at `edlio-presence-build/edlio-presence-day2-snapshot.tar`.
+The running pod is still healthy. Day-2 work is intact.
+
+**Morning recommendation:** push from a cloud host instead — either scp
+the tarball to a small droplet and skopeo copy from there, or figure out
+docker-in-docker on a RunPod. Full notes in
 `/Users/tenedos/edlio-presence-build/PUSH_ME_IN_THE_MORNING.md`.
 
 
@@ -113,9 +120,13 @@ Well under the $20 + $20 limits.
 ## What's ready for Ali to do in the morning (5 min of work)
 
 1. ~~`gh auth refresh -h github.com -s write:packages`~~ ✅ done overnight.
-2. **The direct docker push failed 4x overnight** (see #4 above). Try
-   `brew install skopeo && skopeo copy docker-archive:/Users/tenedos/edlio-presence-build/edlio-presence-day2-snapshot.tar docker://ghcr.io/kemalarsan/edlio-presence:day2-snapshot` —
-   skopeo retries per blob, unlike docker. OR: defer to a better network.
+2. **Both `docker push` (4x) AND `skopeo copy` (1x, 3.5 hours) failed
+   overnight** with "use of closed network connection" on blob upload
+   (see #4 above). The Mac mini can't push this image to GHCR from
+   Comcast. Two options: (a) push from a cloud host on gigabit — scp
+   the tarball to a cheap droplet and skopeo copy from there; (b) defer
+   and keep the current pod as the live server for now. Full details in
+   `PUSH_ME_IN_THE_MORNING.md`.
 3. Review + merge the `overnight/presence-renderer-scaffold` PR on tenedos-voice
 4. Terminate the RunPod pod (image is in GHCR, safety net no longer needed)
 
