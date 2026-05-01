@@ -25,6 +25,19 @@ jobs:
     runs-on: [self-hosted, linux, x64, edlio-presence]
 
     steps:
+      - name: Free up disk on self-hosted runner
+        run: |
+          # Each build pulls/pushes ~11 GB; without pruning, 4-5 builds fill
+          # the 96 GB VPS disk and the runner crashes with 'No space left on
+          # device' mid-stream (see run 25236847296).
+          echo "=== disk before ==="
+          df -h /
+          echo "=== docker cleanup ==="
+          docker image prune -af --filter "until=6h" || true
+          docker builder prune -af --filter "until=6h" || true
+          echo "=== disk after ==="
+          df -h /
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
