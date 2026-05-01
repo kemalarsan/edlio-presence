@@ -1,0 +1,35 @@
+# Don't ship these into the image
+.git
+.github
+.venv
+venv
+node_modules
+__pycache__
+*.pyc
+.DS_Store
+.env
+.env.local
+*.log
+dist
+build
+
+# Weights and runtime artifacts — fetched at first boot
+models
+renderer/muse_talk_vendor/models
+**/*.pth
+**/*.bin
+**/*.safetensors
+*.mp4
+*.wav
+*.mp3
+
+# Dev/CI files not needed in the image
+DAY*.md
+README.md
+*.md
+
+# Test-only artifacts
+pytest-of-root
+.pytest_cache
+.ruff_cache
+.mypy_cache
