@@ -1,6 +1,10 @@
 # Don't ship these into the image
 .git
 .github
+
+# Docs (not needed at runtime)
+docs
+
 .venv
 venv
 node_modules
@@ -19,9 +23,16 @@ renderer/muse_talk_vendor/models
 **/*.pth
 **/*.bin
 **/*.safetensors
+
+# Large media assets — pulled at runtime, not baked in
+assets/*.mp4
+assets/*.wav
+assets/*.mov
+assets/*.mp3
 *.mp4
 *.wav
 *.mp3
+*.mov
 
 # Dev/CI files not needed in the image
 DAY*.md

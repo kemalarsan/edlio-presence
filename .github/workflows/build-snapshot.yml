@@ -1,0 +1,78 @@
+name: Build & publish snapshot image
+
+# Builds the Day-2 snapshot image on the self-hosted Hostinger runner.
+# The runner has /var/lib/edlio-presence/dist-packages.tar.gz (3.3 GB, scp'd once).
+# GitHub's shared runners can't be used here — the 11 GB push reliably times out.
+#
+# DO NOT add pull_request triggers — fork PRs could exfiltrate the tarball.
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+    paths:
+      - 'infra/docker/Dockerfile.snapshot'
+      - 'renderer/**'
+      - '.github/workflows/build-snapshot.yml'
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: Build & push day2-snapshot
+    runs-on: [self-hosted, linux, x64, edlio-presence]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check tarball is present on runner
+        run: |
+          TARBALL="/var/lib/edlio-presence/dist-packages.tar.gz"
+          if [[ ! -f "${TARBALL}" ]]; then
+            echo "::error::dist-packages.tar.gz not found at ${TARBALL}"
+            echo ""
+            echo "This file must be scp'd to the runner once before the workflow can run."
+            echo "From your Mac mini:"
+            echo "  scp /Users/tenedos/edlio-presence-build/dist-packages.tar.gz \\"
+            echo "      root@<VPS_IP>:${TARBALL}"
+            exit 1
+          fi
+          SIZE=$(du -sh "${TARBALL}" | cut -f1)
+          echo "✓ Tarball found: ${TARBALL} (${SIZE})"
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/docker/Dockerfile.snapshot
+          build-contexts: |
+            dist-packages=/var/lib/edlio-presence
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ghcr.io/${{ github.repository }}:day2-snapshot
+            ghcr.io/${{ github.repository }}:latest
+            ghcr.io/${{ github.repository }}:sha-${{ github.sha }}
+          # Use the runner's local Docker layer cache to speed up re-builds
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+
+      # Rotate the cache dir so it doesn't grow unbounded across runs
+      - name: Rotate build cache
+        if: always()
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache 2>/dev/null || true

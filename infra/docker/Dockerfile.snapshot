@@ -1,0 +1,65 @@
+# Dockerfile.snapshot — snapshot-style image from the proven Day-2 Python environment.
+#
+# Rationale: our Day-2 environment took 18+ minutes of iterative pip installs
+# on a running pod to get right. Rebuilding from scratch in CI hits legacy
+# setup.py issues (chumpy, mmcv) that are painful to work around. Instead, we
+# capture the proven state as a tarball and layer it into the same base image.
+#
+# Build (via workflow — preferred):
+#   .github/workflows/build-snapshot.yml on the self-hosted Hostinger runner
+#
+# Manual build (from the repo root):
+#   docker buildx build \
+#     --file infra/docker/Dockerfile.snapshot \
+#     --build-context dist-packages=/var/lib/edlio-presence \
+#     --platform linux/amd64 \
+#     --tag ghcr.io/kemalarsan/edlio-presence:day2-snapshot \
+#     --push \
+#     .
+#
+# The dist-packages build-context must contain dist-packages.tar.gz
+# (the 3.3 GB frozen Python environment from Day 2).
+# On the Hostinger runner it lives at /var/lib/edlio-presence/dist-packages.tar.gz.
+
+# syntax=docker/dockerfile:1.6
+FROM runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
+
+LABEL org.opencontainers.image.source="https://github.com/kemalarsan/edlio-presence"
+LABEL org.opencontainers.image.description="edlio-presence GPU renderer — snapshot from Day-2 A5000 pod"
+LABEL org.opencontainers.image.licenses="MIT"
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    RENDERER_MODEL_DIR=/workspace/edlio-presence/models \
+    HF_HOME=/workspace/.cache/huggingface
+
+# System deps — keep minimal since base image already has most of what we need
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ffmpeg \
+        espeak-ng \
+    && rm -rf /var/lib/apt/lists/*
+
+# Snapshot the proven-working Python environment directly.
+# dist-packages.tar.gz is provided via --build-context dist-packages=<dir>
+# so the Dockerfile never needs the tarball in the main build context.
+COPY --from=dist-packages dist-packages.tar.gz /tmp/dist-packages.tar.gz
+RUN rm -rf /usr/local/lib/python3.11/dist-packages && \
+    mkdir -p /usr/local/lib/python3.11 && \
+    tar -xzf /tmp/dist-packages.tar.gz -C /usr/local/lib/python3.11 && \
+    rm /tmp/dist-packages.tar.gz
+
+# Project source — the build context is the repo root.
+# Heavy files (weights, videos, caches) are excluded via .dockerignore.
+WORKDIR /workspace/edlio-presence
+COPY . /workspace/edlio-presence/
+
+# models/ symlink: renderer/muse_talk_vendor/models → /workspace/edlio-presence/models
+# Weights are NOT baked in — fetch_weights.sh pulls them on first boot.
+RUN ln -sf renderer/muse_talk_vendor/models /workspace/edlio-presence/models
+
+# Bootstrap helpers live at infra/docker/ in the repo
+RUN chmod +x /workspace/edlio-presence/infra/docker/entrypoint.sh \
+             /workspace/edlio-presence/infra/docker/fetch_weights.sh
+
+ENTRYPOINT ["/workspace/edlio-presence/infra/docker/entrypoint.sh"]
+CMD ["bash"]
