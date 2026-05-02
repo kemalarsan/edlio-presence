@@ -19,6 +19,15 @@ permissions:
   contents: read
   packages: write
 
+# Only one build at a time. A 96 GB VPS can't fit two parallel snapshot builds
+# (each needs ~11 GB for the new image on top of the 3.3 GB tarball + layer
+# cache). Added 2026-05-01 after a Hostinger disk alert from 3 back-to-back
+# builds. `cancel-in-progress: false` means if someone pushes twice quickly
+# the second build queues instead of killing the first.
+concurrency:
+  group: build-snapshot
+  cancel-in-progress: false
+
 jobs:
   build:
     name: Build & push day2-snapshot
@@ -33,8 +42,13 @@ jobs:
           echo "=== disk before ==="
           df -h /
           echo "=== docker cleanup ==="
-          docker image prune -af --filter "until=6h" || true
-          docker builder prune -af --filter "until=6h" || true
+          # Prune aggressively — we don't rely on image reuse across runs, we
+          # rely on the buildx layer cache in /tmp/.buildx-cache instead. This
+          # frees ~11 GB per stale snapshot image. The `until=1h` filter still
+          # protects an actively-running parallel build (workflow is
+          # concurrency:1 anyway, so this is belt-and-braces).
+          docker image prune -af --filter "until=1h" || true
+          docker builder prune -af --filter "until=1h" || true
           echo "=== disk after ==="
           df -h /
 
