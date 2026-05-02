@@ -71,9 +71,15 @@ RUN pip install --no-cache-dir --no-deps \
 
 # basicsr 1.4.2 imports `torchvision.transforms.functional_tensor` which was
 # removed in torchvision >=0.17. We're on 0.19.1. One-line import rewrite.
+# We can't `import basicsr` to find its path (that's what this patch fixes),
+# so use importlib.util.find_spec which just reads the package metadata.
 RUN python - <<'PY'
-import pathlib
-p = pathlib.Path(__import__('basicsr').__file__).parent / 'data' / 'degradations.py'
+import importlib.util, pathlib
+spec = importlib.util.find_spec('basicsr')
+if spec is None or not spec.submodule_search_locations:
+    raise SystemExit('basicsr not importable at all; pip install failed?')
+pkg = pathlib.Path(list(spec.submodule_search_locations)[0])
+p = pkg / 'data' / 'degradations.py'
 src = p.read_text()
 new = src.replace(
     'from torchvision.transforms.functional_tensor import rgb_to_grayscale',
@@ -81,9 +87,13 @@ new = src.replace(
 )
 if new != src:
     p.write_text(new)
-    print('patched basicsr degradations.py for torchvision>=0.17')
+    print('patched', p, 'for torchvision>=0.17')
 else:
     print('basicsr already compatible, no patch needed')
+# Also verify import works now end-to-end.
+import importlib
+importlib.import_module('basicsr')
+print('basicsr imports cleanly after patch.')
 PY
 
 # Project source — the build context is the repo root.
