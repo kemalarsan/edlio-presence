@@ -100,6 +100,25 @@ class RenderRequest(BaseModel):
         description="Stable key so repeated renders of the same portrait reuse preprocessed latents",
     )
     fps: int = Field(default=25, ge=5, le=60, description="Target frames per second")
+    faceBox: Optional[list[int]] = Field(
+        default=None,
+        description=(
+            "Optional face bounding box in portrait pixel coords [x1, y1, x2, y2]. "
+            "When provided, the server renders a full-portrait composite with the "
+            "predicted mouth region blended back in. When omitted, returns the raw "
+            "256×256 face patch (legacy POC behaviour)."
+        ),
+    )
+    extraMargin: int = Field(
+        default=10,
+        ge=0,
+        le=200,
+        description="Extra pixels added to bottom of faceBox to include chin. Default 10 matches MuseTalk app.py.",
+    )
+    parsingMode: str = Field(
+        default="jaw",
+        description="Face parsing mode passed through to blending.get_image(). 'jaw' is MuseTalk V1.5 default.",
+    )
 
 
 class RenderResponse(BaseModel):
@@ -179,9 +198,22 @@ def render(req: RenderRequest) -> RenderResponse:
         # 3–6 inside a lock because the GPU can only do one render at a time
         with _render_lock:
             try:
-                engine = _get_or_create_engine(portrait_path, req.portraitCacheKey)
+                use_composite = req.faceBox is not None and len(req.faceBox) == 4
+                if use_composite:
+                    renderer_obj = _get_or_create_composite_renderer(
+                        portrait_path=portrait_path,
+                        cache_key=req.portraitCacheKey,
+                        face_box=list(req.faceBox or []),
+                        extra_margin=req.extraMargin,
+                        parsing_mode=req.parsingMode,
+                    )
+                    log.info("render mode: composite (full portrait, bbox=%s)", req.faceBox)
+                else:
+                    renderer_obj = _get_or_create_engine(portrait_path, req.portraitCacheKey)
+                    log.info("render mode: legacy (256×256 face patch)")
+
                 features = _extract_features(audio_path, fps=float(req.fps))
-                frames = _render_frames(engine, features)
+                frames = _render_frames(renderer_obj, features)
                 out_path = OUTPUT_DIR / f"{job_id}.mp4"
                 _write_mp4(frames, audio_path, out_path, fps=req.fps)
             except Exception as e:  # noqa: BLE001
@@ -264,7 +296,7 @@ def _resolve_portrait(url: str, dst: Path, cache_key: Optional[str]) -> Path:
 
 
 def _get_or_create_engine(portrait_path: Path, cache_key: Optional[str]) -> object:
-    """Cache one MuseTalkEngine per portraitCacheKey."""
+    """Cache one MuseTalkEngine per portraitCacheKey (legacy 256×256 face patch path)."""
     key = cache_key or str(portrait_path)
     if key in _engine_cache:
         log.info("engine cache hit: %s", key)
@@ -282,6 +314,47 @@ def _get_or_create_engine(portrait_path: Path, cache_key: Optional[str]) -> obje
     )
     _engine_cache[key] = engine
     return engine
+
+
+def _get_or_create_composite_renderer(
+    portrait_path: Path,
+    cache_key: Optional[str],
+    face_box: list[int],
+    extra_margin: int,
+    parsing_mode: str,
+) -> object:
+    """Cache one MuseTalkCompositeRenderer per (portraitCacheKey, bbox, parsing_mode).
+
+    Distinct cache namespace from the legacy engine so both render paths can
+    coexist during rollout.
+    """
+    key = "composite::" + "|".join([
+        cache_key or str(portrait_path),
+        ",".join(str(v) for v in face_box),
+        str(extra_margin),
+        parsing_mode,
+    ])
+    if key in _engine_cache:
+        log.info("composite renderer cache hit: %s", key)
+        return _engine_cache[key]
+
+    from renderer.composite import MuseTalkCompositeRenderer  # local import
+
+    log.info(
+        "building composite renderer for portrait=%s bbox=%s extra_margin=%d parsing_mode=%s",
+        portrait_path, face_box, extra_margin, parsing_mode,
+    )
+    renderer_ = MuseTalkCompositeRenderer(
+        portrait_path=str(portrait_path),
+        face_box=face_box,
+        device="cuda",
+        model_dir=MODEL_DIR,
+        use_float16=True,
+        extra_margin=extra_margin,
+        parsing_mode=parsing_mode,
+    )
+    _engine_cache[key] = renderer_
+    return renderer_
 
 
 def _extract_features(audio_path: Path, fps: float):
@@ -304,7 +377,12 @@ def _extract_features(audio_path: Path, fps: float):
 
 
 def _render_frames(engine, features) -> list[np.ndarray]:
-    """Render all frames, returning plain numpy RGB arrays."""
+    """Render all frames, returning plain numpy RGB arrays.
+
+    Accepts either the legacy MuseTalkEngine (returns RendererFrame wrapping
+    a 256×256 face patch) or MuseTalkCompositeRenderer (returns a full-portrait
+    np.ndarray directly).
+    """
     T = features.num_frames()
     out: list[np.ndarray] = []
     log.info("rendering %d frames", T)
