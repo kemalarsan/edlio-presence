@@ -68,6 +68,26 @@ RUN pip install --no-build-isolation "chumpy==0.70" && \
 COPY infra/docker/requirements-pod.txt /tmp/requirements-pod.txt
 RUN pip install --no-build-isolation -r /tmp/requirements-pod.txt
 
+# basicsr 1.4.2 + torchvision>=0.17 compatibility shim.
+# basicsr.data.degradations imports `torchvision.transforms.functional_tensor`
+# which was moved to `torchvision.transforms.functional` in 0.17 and removed
+# outright after 0.19. The well-known fix is a one-line import rewrite in
+# basicsr itself; we do it in place rather than monkey-patch at runtime.
+RUN python - <<'PY'
+import pathlib, re
+p = pathlib.Path(__import__('basicsr').__file__).parent / 'data' / 'degradations.py'
+src = p.read_text()
+new = src.replace(
+    'from torchvision.transforms.functional_tensor import rgb_to_grayscale',
+    'from torchvision.transforms.functional import rgb_to_grayscale',
+)
+if new != src:
+    p.write_text(new)
+    print('patched basicsr degradations.py for torchvision>=0.17')
+else:
+    print('basicsr degradations.py already fine, no patch needed')
+PY
+
 # Workspace setup
 WORKDIR /workspace/edlio-presence
 

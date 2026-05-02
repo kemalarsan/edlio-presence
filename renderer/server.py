@@ -119,6 +119,23 @@ class RenderRequest(BaseModel):
         default="jaw",
         description="Face parsing mode passed through to blending.get_image(). 'jaw' is MuseTalk V1.5 default.",
     )
+    gfpgan: bool = Field(
+        default=False,
+        description=(
+            "When true, run a GFPGAN post-sharpening pass on MuseTalk's 256×256 face output "
+            "before compositing. Requires faceBox (composite path) and the GFPGAN weights on "
+            "the model volume. Weights auto-download on first use (~334 MB)."
+        ),
+    )
+    gfpganWeight: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "GFPGAN identity/quality knob. 0.0=no effect, 0.5=balanced, 1.0=maximum restoration. "
+            "Low values (0.3-0.5) preserve MuseTalk's lip shape better."
+        ),
+    )
 
 
 class RenderResponse(BaseModel):
@@ -206,8 +223,13 @@ def render(req: RenderRequest) -> RenderResponse:
                         face_box=list(req.faceBox or []),
                         extra_margin=req.extraMargin,
                         parsing_mode=req.parsingMode,
+                        use_gfpgan=req.gfpgan,
+                        gfpgan_weight=req.gfpganWeight,
                     )
-                    log.info("render mode: composite (full portrait, bbox=%s)", req.faceBox)
+                    log.info(
+                        "render mode: composite (full portrait, bbox=%s, gfpgan=%s, weight=%.2f)",
+                        req.faceBox, req.gfpgan, req.gfpganWeight,
+                    )
                 else:
                     renderer_obj = _get_or_create_engine(portrait_path, req.portraitCacheKey)
                     log.info("render mode: legacy (256×256 face patch)")
@@ -322,17 +344,21 @@ def _get_or_create_composite_renderer(
     face_box: list[int],
     extra_margin: int,
     parsing_mode: str,
+    use_gfpgan: bool = False,
+    gfpgan_weight: float = 0.5,
 ) -> object:
-    """Cache one MuseTalkCompositeRenderer per (portraitCacheKey, bbox, parsing_mode).
+    """Cache one MuseTalkCompositeRenderer per (portraitCacheKey, bbox, parsing_mode, gfpgan).
 
     Distinct cache namespace from the legacy engine so both render paths can
-    coexist during rollout.
+    coexist during rollout. GFPGAN-enabled and GFPGAN-disabled renderers are
+    cached separately so toggling at request time just swaps cache entries.
     """
     key = "composite::" + "|".join([
         cache_key or str(portrait_path),
         ",".join(str(v) for v in face_box),
         str(extra_margin),
         parsing_mode,
+        f"gfp={use_gfpgan}:{gfpgan_weight:.2f}",
     ])
     if key in _engine_cache:
         log.info("composite renderer cache hit: %s", key)
@@ -341,8 +367,8 @@ def _get_or_create_composite_renderer(
     from renderer.composite import MuseTalkCompositeRenderer  # local import
 
     log.info(
-        "building composite renderer for portrait=%s bbox=%s extra_margin=%d parsing_mode=%s",
-        portrait_path, face_box, extra_margin, parsing_mode,
+        "building composite renderer for portrait=%s bbox=%s extra_margin=%d parsing_mode=%s gfpgan=%s",
+        portrait_path, face_box, extra_margin, parsing_mode, use_gfpgan,
     )
     renderer_ = MuseTalkCompositeRenderer(
         portrait_path=str(portrait_path),
@@ -352,6 +378,8 @@ def _get_or_create_composite_renderer(
         use_float16=True,
         extra_margin=extra_margin,
         parsing_mode=parsing_mode,
+        use_gfpgan=use_gfpgan,
+        gfpgan_weight=gfpgan_weight,
     )
     _engine_cache[key] = renderer_
     return renderer_

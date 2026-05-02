@@ -86,6 +86,8 @@ class MuseTalkCompositeRenderer:
         parsing_mode: str = "jaw",
         left_cheek_width: int = 90,
         right_cheek_width: int = 90,
+        use_gfpgan: bool = False,
+        gfpgan_weight: float = 0.5,
     ) -> None:
         import cv2
         import torch
@@ -130,6 +132,20 @@ class MuseTalkCompositeRenderer:
             right_cheek_width=right_cheek_width,
         )
         self._precompute_portrait_latents()
+
+        # Optional GFPGAN sharpener. Lazy-built so import errors surface early
+        # only when the caller actually asks for it.
+        self.sharpener = None
+        if use_gfpgan:
+            from .gfpgan_pass import GFPGANSharpener  # noqa: PLC0415
+            self.sharpener = GFPGANSharpener(
+                model_dir=self.model_dir,
+                device=device,
+                weight=gfpgan_weight,
+            )
+            logger.info("Composite renderer: GFPGAN post-pass ENABLED (weight=%.2f)", gfpgan_weight)
+        else:
+            logger.info("Composite renderer: GFPGAN post-pass disabled.")
 
     # ------------------------------------------------------------------ models
     def _load_models(self) -> None:
@@ -270,6 +286,10 @@ class MuseTalkCompositeRenderer:
             res_256 = recon
 
         res_uint8 = np.clip(res_256, 0, 255).astype(np.uint8)
+
+        # --- Optional GFPGAN sharpening on the 256×256 patch ---------------
+        if self.sharpener is not None:
+            res_uint8 = self.sharpener.enhance(res_uint8)
 
         # --- Resize generated face back to original bbox dims ----------------
         h_crop, w_crop = self._face_crop_shape
