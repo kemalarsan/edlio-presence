@@ -64,11 +64,13 @@ if ! "$VPY" -c "import torch; assert torch.__version__.startswith('2.5')" 2>/dev
 fi
 
 # ─── 4. install AniPortrait deps ────────────────────────────────────────────
-if ! "$VPY" -c "import diffusers" 2>/dev/null; then
+if ! "$VPY" -c "import diffusers, pkg_resources" 2>/dev/null; then
     log "installing AniPortrait python deps (~2 min)"
     # Their requirements.txt pins many old versions. We use modern versions
     # that are compatible with torch 2.5.
+    # setuptools<81 still exposes pkg_resources, which librosa 0.10 imports.
     "$VPIP" install --no-cache-dir \
+        'setuptools<81' \
         diffusers==0.24.0 transformers==4.36.2 \
         accelerate==0.25.0 einops==0.7.0 \
         omegaconf==2.3.0 opencv-python==4.9.0.80 \
@@ -192,7 +194,18 @@ snapshot_download(
 print("all base models fetched")
 PY
 
-# ─── 6. sanity: can we import? ──────────────────────────────────────────────
+# ─── 6. symlink pretrained_model ─ pretrained_weights ─────────────────────
+# Their code has two directory naming conventions mixed in:
+#   - README says pretrained_weights/
+#   - frame_interpolation.py hard-codes ./pretrained_model/film_net_fp16.pt
+# We download to pretrained_weights/ (per README) and symlink pretrained_model
+# to it so hard-coded paths resolve.
+if [[ ! -e "$REPO_DIR/pretrained_model" ]]; then
+    log "symlinking pretrained_model → pretrained_weights (their code has both names)"
+    (cd "$REPO_DIR" && ln -s pretrained_weights pretrained_model) >>"$LOG" 2>&1
+fi
+
+# ─── 7. sanity: can we import? ──────────────────────────────────────────
 log "sanity check: importing scripts.audio2vid module"
 cd "$REPO_DIR"
 "$VPY" -c "
