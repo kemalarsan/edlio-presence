@@ -12,6 +12,8 @@ on:
     branches: [main]
     paths:
       - 'infra/docker/**'
+      - 'infra/latentsync/**'
+      - 'infra/aniportrait/**'
       - 'renderer/**'
       - '.github/workflows/build-snapshot.yml'
 
