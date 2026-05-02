@@ -94,16 +94,16 @@ print(f"downloaded: {path}")
 PY
 fi
 
-WHISPER_PT="$CKPT_DIR/whisper/small.pt"
+WHISPER_PT="$CKPT_DIR/whisper/tiny.pt"
 if [[ ! -s "$WHISPER_PT" ]]; then
-    # LatentSync-1.6 uses whisper *small* (cross_attention_dim=768).
-    # 1.5 used tiny (384). We're going for 1.6 quality.
-    log "downloading whisper small.pt (~1 GB)"
+    # LatentSync-1.6 stage2_512.yaml has cross_attention_dim=384 → whisper tiny.
+    # (An earlier reading of the README suggested small; the config disagrees.)
+    log "downloading whisper tiny.pt (~75 MB)"
     "$VPY" - <<'PY' >>"$LOG" 2>&1
 from huggingface_hub import hf_hub_download
 path = hf_hub_download(
     repo_id="ByteDance/LatentSync-1.6",
-    filename="whisper/small.pt",
+    filename="whisper/tiny.pt",
     local_dir="/workspace/LatentSync/checkpoints",
 )
 print(f"downloaded: {path}")

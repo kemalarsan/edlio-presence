@@ -367,6 +367,34 @@ def latentsync_status() -> dict[str, object]:
     return {**st, "log_tail": log_tail}
 
 
+@app.post("/latentsync/retry_setup", dependencies=[Depends(verify_token)])
+def latentsync_retry_setup() -> dict[str, object]:
+    """Clear .failed/.ready sentinels and kick the setup script in background.
+
+    Needed because we can't SSH into the pod — this is the only way to recover
+    from a setup failure without a full image rebuild + pod restart.
+    """
+    from renderer import latentsync_runner
+    for sentinel in (latentsync_runner.LATENTSYNC_READY_SENTINEL, latentsync_runner.LATENTSYNC_FAILED_SENTINEL):
+        try:
+            sentinel.unlink(missing_ok=True)
+        except Exception as e:  # noqa: BLE001
+            log.warning("unlink %s: %s", sentinel, e)
+    # Fire-and-forget the setup script. Log goes to /tmp/latentsync-setup.log.
+    subprocess.Popen(
+        [
+            "bash", "-c",
+            "bash /workspace/edlio-presence/infra/latentsync/setup.sh "
+            "&& touch /workspace/LatentSync/.ready "
+            "|| touch /workspace/LatentSync/.failed",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    return {"ok": True, "message": "setup kicked; poll /latentsync/status"}
+
+
 @app.post("/render_latentsync", dependencies=[Depends(verify_token)])
 def render_latentsync(req: LatentSyncRenderRequest) -> dict[str, object]:
     """Run LatentSync-1.6 in its isolated venv and return a /renders/<id>.mp4 URL."""
