@@ -590,6 +590,66 @@ def aniportrait_retry_setup() -> dict[str, object]:
     return {"ok": True, "message": "setup kicked; poll /aniportrait/status"}
 
 
+@app.post("/aniportrait/fixup", dependencies=[Depends(verify_token)])
+def aniportrait_fixup() -> dict[str, object]:
+    """One-shot post-install fixer for issues we discover after the image is built.
+    
+    Specifically:
+    1. Symlink pretrained_model → pretrained_weights (their code uses both names)
+    2. Ensure setuptools<81 so librosa's pkg_resources import works
+    
+    Safe to call repeatedly. Exists because RunPod image cache can pin to an
+    older snapshot than the latest ghcr build.
+    """
+    import os
+    repo = Path("/workspace/AniPortrait")
+    report = {}
+
+    # 1. Symlink
+    link = repo / "pretrained_model"
+    target = repo / "pretrained_weights"
+    if link.exists() or link.is_symlink():
+        report["symlink"] = "already exists"
+    elif target.exists():
+        try:
+            os.symlink("pretrained_weights", str(link))
+            report["symlink"] = "created"
+        except Exception as e:  # noqa: BLE001
+            report["symlink"] = f"failed: {e}"
+    else:
+        report["symlink"] = f"target {target} missing"
+
+    # 2. Downgrade setuptools inside aniportrait venv
+    vpip = "/opt/aniportrait-venv/bin/pip"
+    try:
+        proc = subprocess.run(
+            [vpip, "install", "--no-cache-dir", "setuptools<81"],
+            capture_output=True, text=True, timeout=120,
+        )
+        report["setuptools"] = {
+            "returncode": proc.returncode,
+            "stdout_tail": (proc.stdout or "")[-500:],
+        }
+    except Exception as e:  # noqa: BLE001
+        report["setuptools"] = f"failed: {e}"
+
+    # 3. Verify pkg_resources importable
+    try:
+        proc = subprocess.run(
+            ["/opt/aniportrait-venv/bin/python", "-c", "import pkg_resources; print('ok')"],
+            capture_output=True, text=True, timeout=30,
+        )
+        report["pkg_resources"] = {
+            "ok": proc.returncode == 0,
+            "stdout": (proc.stdout or "").strip(),
+            "stderr": (proc.stderr or "").strip()[:300],
+        }
+    except Exception as e:  # noqa: BLE001
+        report["pkg_resources"] = f"failed: {e}"
+
+    return {"ok": True, "fixup": report}
+
+
 _aniportrait_jobs: dict[str, dict] = {}
 _aniportrait_jobs_lock = threading.Lock()
 
