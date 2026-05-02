@@ -94,7 +94,27 @@ def verify_token(authorization: Optional[str] = Header(default=None)) -> None:
 # ---------------------------------------------------------------------------
 class RenderRequest(BaseModel):
     audio: str = Field(..., description="Base64 PCM16 mono 16kHz OR http(s) URL to wav/mp3")
-    portrait: str = Field(..., description="http(s) URL to a portrait image (PNG/JPEG)")
+    portrait: str = Field(
+        ..., description="http(s) URL to a portrait image (PNG/JPEG) — or a video (.mp4/.mov) when portraitIsVideo=true",
+    )
+    portraitIsVideo: bool = Field(
+        default=False,
+        description=(
+            "When true, treat `portrait` as a video URL and use the video-reference "
+            "renderer (samples N frames, banks their latents, cycles per output frame). "
+            "Requires faceBox. Produces visibly more alive output at a higher warm-up cost."
+        ),
+    )
+    portraitNumRefFrames: int = Field(
+        default=60,
+        ge=4,
+        le=240,
+        description=(
+            "When portraitIsVideo=true, how many reference frames to sample from the clip. "
+            "Default 60 (~2.4s of 25fps motion before the bank loops). Higher=more variety, "
+            "more VRAM, slower warm-up."
+        ),
+    )
     portraitCacheKey: Optional[str] = Field(
         default=None,
         description="Stable key so repeated renders of the same portrait reuse preprocessed latents",
@@ -208,9 +228,15 @@ def render(req: RenderRequest) -> RenderResponse:
         except Exception as e:  # noqa: BLE001
             raise HTTPException(400, detail={"error": "bad_audio", "message": str(e)})
 
-        # 2. Portrait
+        # 2. Portrait — image OR video depending on req.portraitIsVideo
+        portrait_local_ext = ".mp4" if req.portraitIsVideo else ".jpg"
         try:
-            portrait_path = _resolve_portrait(req.portrait, tmp / "portrait.jpg", req.portraitCacheKey)
+            portrait_path = _resolve_portrait(
+                req.portrait,
+                tmp / f"portrait{portrait_local_ext}",
+                req.portraitCacheKey,
+                is_video=req.portraitIsVideo,
+            )
         except Exception as e:  # noqa: BLE001
             raise HTTPException(400, detail={"error": "portrait_fetch_failed", "message": str(e)})
 
@@ -218,7 +244,30 @@ def render(req: RenderRequest) -> RenderResponse:
         with _render_lock:
             try:
                 use_composite = req.faceBox is not None and len(req.faceBox) == 4
-                if use_composite:
+                if req.portraitIsVideo:
+                    if not use_composite:
+                        raise HTTPException(
+                            400,
+                            detail={
+                                "error": "bad_request",
+                                "message": "portraitIsVideo=true requires faceBox",
+                            },
+                        )
+                    renderer_obj = _get_or_create_videoref_renderer(
+                        video_path=portrait_path,
+                        cache_key=req.portraitCacheKey,
+                        face_box=list(req.faceBox or []),
+                        extra_margin=req.extraMargin,
+                        parsing_mode=req.parsingMode,
+                        use_gfpgan=req.gfpgan,
+                        gfpgan_weight=req.gfpganWeight,
+                        num_ref_frames=req.portraitNumRefFrames,
+                    )
+                    log.info(
+                        "render mode: videoref (bbox=%s, gfpgan=%s, weight=%.2f, num_ref_frames=%d)",
+                        req.faceBox, req.gfpgan, req.gfpganWeight, req.portraitNumRefFrames,
+                    )
+                elif use_composite:
                     renderer_obj = _get_or_create_composite_renderer(
                         portrait_path=portrait_path,
                         cache_key=req.portraitCacheKey,
@@ -298,24 +347,33 @@ def _resolve_audio(audio: str, dst: Path) -> Path:
     return dst
 
 
-def _resolve_portrait(url: str, dst: Path, cache_key: Optional[str]) -> Path:
-    """Fetch portrait to a local file. Cached on disk if cache_key provided."""
+def _resolve_portrait(
+    url: str,
+    dst: Path,
+    cache_key: Optional[str],
+    *,
+    is_video: bool = False,
+) -> Path:
+    """Fetch portrait to a local file. Cached on disk if cache_key provided.
+
+    When ``is_video=True``, caches as .mp4 in portraits/ (separate namespace).
+    """
+    ext = ".mp4" if is_video else ".jpg"
     if cache_key:
-        cached = OUTPUT_DIR.parent / "portraits" / f"{cache_key}.jpg"
+        cached = OUTPUT_DIR.parent / "portraits" / f"{cache_key}{ext}"
         cached.parent.mkdir(parents=True, exist_ok=True)
         if cached.exists():
-            log.info("portrait cache hit: %s", cache_key)
+            log.info("portrait cache hit: %s (ext=%s)", cache_key, ext)
             return cached
     if url.startswith(("http://", "https://")):
-        log.info("fetching portrait URL: %s", url)
+        log.info("fetching portrait URL: %s (is_video=%s)", url, is_video)
         urllib.request.urlretrieve(url, dst)
     else:
-        # Allow absolute paths on the pod (dev only)
         if not Path(url).exists():
             raise FileNotFoundError(url)
         shutil.copy(url, dst)
     if cache_key:
-        shutil.copy(dst, OUTPUT_DIR.parent / "portraits" / f"{cache_key}.jpg")
+        shutil.copy(dst, OUTPUT_DIR.parent / "portraits" / f"{cache_key}{ext}")
     return dst
 
 
@@ -338,6 +396,55 @@ def _get_or_create_engine(portrait_path: Path, cache_key: Optional[str]) -> obje
     )
     _engine_cache[key] = engine
     return engine
+
+
+def _get_or_create_videoref_renderer(
+    video_path: Path,
+    cache_key: Optional[str],
+    face_box: list[int],
+    extra_margin: int,
+    parsing_mode: str,
+    use_gfpgan: bool = False,
+    gfpgan_weight: float = 0.5,
+    num_ref_frames: int = 60,
+) -> object:
+    """Cache one MuseTalkVideoRefRenderer per (cacheKey, bbox, params, num_ref).
+
+    Uses the ``videoref::`` prefix so it never clashes with still-portrait or
+    legacy entries in the shared ``_engine_cache``.
+    """
+    key = "videoref::" + "|".join([
+        cache_key or str(video_path),
+        ",".join(str(v) for v in face_box),
+        str(extra_margin),
+        parsing_mode,
+        f"gfp={use_gfpgan}:{gfpgan_weight:.2f}",
+        f"nref={num_ref_frames}",
+    ])
+    if key in _engine_cache:
+        log.info("videoref renderer cache hit: %s", key)
+        return _engine_cache[key]
+
+    from renderer.composite_videoref import MuseTalkVideoRefRenderer  # local import
+
+    log.info(
+        "building videoref renderer for video=%s bbox=%s extra_margin=%d parsing_mode=%s gfpgan=%s num_ref=%d",
+        video_path, face_box, extra_margin, parsing_mode, use_gfpgan, num_ref_frames,
+    )
+    renderer_ = MuseTalkVideoRefRenderer(
+        video_path=str(video_path),
+        face_box=face_box,
+        device="cuda",
+        model_dir=MODEL_DIR,
+        use_float16=True,
+        extra_margin=extra_margin,
+        parsing_mode=parsing_mode,
+        use_gfpgan=use_gfpgan,
+        gfpgan_weight=gfpgan_weight,
+        num_ref_frames=num_ref_frames,
+    )
+    _engine_cache[key] = renderer_
+    return renderer_
 
 
 def _get_or_create_composite_renderer(
