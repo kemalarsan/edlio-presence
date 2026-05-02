@@ -183,15 +183,23 @@ def healthz() -> dict[str, object]:
     except Exception as e:  # noqa: BLE001
         log.warning("CUDA probe failed: %s", e)
 
+    latentsync_st = {}
+    try:
+        from renderer import latentsync_runner
+        latentsync_st = latentsync_runner.status()
+    except Exception as e:  # noqa: BLE001
+        latentsync_st = {"error": str(e)}
+
     return {
         "ok": True,
-        "version": "0.2.0",
-        "engine": "musetalk-v1.5",
+        "version": "0.3.0",
+        "engines": ["musetalk-v1.5", "latentsync-1.6"],
         "cuda": cuda_ok,
         "gpu": gpu_name,
         "model_dir": MODEL_DIR,
         "model_dir_exists": Path(MODEL_DIR).exists(),
         "cached_engines": list(_engine_cache.keys()),
+        "latentsync": latentsync_st,
     }
 
 
@@ -322,6 +330,116 @@ def get_render(filename: str) -> FileResponse:
     if not path.exists() or path.suffix != ".mp4":
         raise HTTPException(status_code=404, detail="not found")
     return FileResponse(path, media_type="video/mp4")
+
+
+# ---------------------------------------------------------------------------
+# /render_latentsync  —  alt renderer: ByteDance LatentSync-1.6 (512×512)
+# ---------------------------------------------------------------------------
+# Kept isolated from the MuseTalk path because LatentSync uses a different
+# torch/diffusers/numpy stack in its own venv. We shell out to its inference
+# CLI rather than bolting it into our compositor.
+
+class LatentSyncRenderRequest(BaseModel):
+    portraitVideo: str = Field(
+        ...,
+        description=(
+            "Portrait video URL. LatentSync does its own face detection + "
+            "512×512 crop + temporal lip-sync + compositing."
+        ),
+    )
+    audio: str = Field(..., description="Audio URL or base64 (same contract as /render).")
+    inferenceSteps: int = Field(default=20, ge=5, le=50)
+    guidanceScale: float = Field(default=1.5, ge=1.0, le=3.0)
+    seed: int = Field(default=1247, description="Set to -1 for random.")
+    enableDeepcache: bool = Field(default=True)
+
+
+@app.get("/latentsync/status")
+def latentsync_status() -> dict[str, object]:
+    """Expose install/setup progress so I can poll from my laptop."""
+    from renderer import latentsync_runner
+    st = latentsync_runner.status()
+    log_tail = ""
+    try:
+        log_tail = Path("/tmp/latentsync-setup.log").read_text()[-2000:]
+    except Exception:  # noqa: BLE001
+        pass
+    return {**st, "log_tail": log_tail}
+
+
+@app.post("/render_latentsync", dependencies=[Depends(verify_token)])
+def render_latentsync(req: LatentSyncRenderRequest) -> dict[str, object]:
+    """Run LatentSync-1.6 in its isolated venv and return a /renders/<id>.mp4 URL."""
+    from renderer import latentsync_runner
+
+    start = time.time()
+    job_id = hashlib.sha256(
+        f"latentsync|{req.portraitVideo}|{time.time()}".encode()
+    ).hexdigest()[:16]
+    log.info("latentsync render job=%s", job_id)
+
+    with tempfile.TemporaryDirectory(prefix=f"ls-{job_id}-") as tmpdir:
+        tmp = Path(tmpdir)
+
+        # Audio
+        try:
+            audio_path = _resolve_audio(req.audio, tmp / "input.wav")
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(400, detail={"error": "bad_audio", "message": str(e)})
+
+        # Portrait video — always fetched, not cached (LatentSync does its own
+        # pre-processing so there's no benefit to caching the raw mp4)
+        video_path = tmp / "portrait.mp4"
+        try:
+            urllib.request.urlretrieve(req.portraitVideo, video_path)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(
+                400,
+                detail={"error": "portrait_fetch_failed", "message": str(e)},
+            )
+
+        out_path = OUTPUT_DIR / f"{job_id}.mp4"
+
+        with _render_lock:
+            try:
+                result = latentsync_runner.render(
+                    video_path=video_path,
+                    audio_path=audio_path,
+                    output_path=out_path,
+                    inference_steps=req.inferenceSteps,
+                    guidance_scale=req.guidanceScale,
+                    seed=req.seed,
+                    enable_deepcache=req.enableDeepcache,
+                )
+            except latentsync_runner.LatentSyncNotReady as e:
+                raise HTTPException(503, detail={"error": "not_ready", "message": str(e)})
+            except latentsync_runner.LatentSyncSetupFailed as e:
+                raise HTTPException(500, detail={"error": "setup_failed", "message": str(e)})
+            except subprocess.CalledProcessError as e:
+                raise HTTPException(
+                    500,
+                    detail={
+                        "error": "latentsync_failed",
+                        "returncode": e.returncode,
+                        "stderr_tail": (e.stderr or "")[-2000:],
+                    },
+                )
+
+    total = time.time() - start
+    base = PUBLIC_BASE_URL.rstrip("/")
+    video_url = f"{base}/renders/{out_path.name}" if base else f"/renders/{out_path.name}"
+    return {
+        "ok": True,
+        "videoUrl": video_url,
+        "metrics": {
+            "job_id": job_id,
+            "total_wall_sec": round(total, 2),
+            "render_sec": round(float(result["elapsed_sec"]), 2),
+            "engine": "latentsync-1.6",
+            "inference_steps": req.inferenceSteps,
+            "guidance_scale": req.guidanceScale,
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
