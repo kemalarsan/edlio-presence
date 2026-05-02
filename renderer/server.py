@@ -128,12 +128,14 @@ class RenderRequest(BaseModel):
         ),
     )
     gfpganWeight: float = Field(
-        default=0.5,
+        default=0.3,
         ge=0.0,
         le=1.0,
         description=(
-            "GFPGAN identity/quality knob. 0.0=no effect, 0.5=balanced, 1.0=maximum restoration. "
-            "Low values (0.3-0.5) preserve MuseTalk's lip shape better."
+            "GFPGAN identity/quality knob. 0.0=no effect, 1.0=maximum restoration. "
+            "Empirical sweet spot for talking-face stills is 0.2-0.3: enough to sharpen "
+            "teeth and lip edges without the plasticky 'doll' look that appears >=0.5. "
+            "Calibrated 2026-05-01 on tenedos-v1.png; revisit per portrait if needed."
         ),
     )
 
