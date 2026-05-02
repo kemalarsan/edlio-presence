@@ -332,6 +332,22 @@ def get_render(filename: str) -> FileResponse:
     return FileResponse(path, media_type="video/mp4")
 
 
+@app.get("/renders")
+def list_renders(limit: int = 20) -> dict[str, object]:
+    """List recent renders by mtime. Used when Cloudflare 524s on sync calls
+    and we need to find the output file post-hoc."""
+    items = []
+    for p in sorted(OUTPUT_DIR.glob("*.mp4"), key=lambda x: x.stat().st_mtime, reverse=True)[:limit]:
+        st = p.stat()
+        items.append({
+            "name": p.name,
+            "size": st.st_size,
+            "mtime": st.st_mtime,
+            "age_sec": round(time.time() - st.st_mtime, 1),
+        })
+    return {"count": len(items), "items": items}
+
+
 # ---------------------------------------------------------------------------
 # /render_latentsync  —  alt renderer: ByteDance LatentSync-1.6 (512×512)
 # ---------------------------------------------------------------------------
@@ -395,41 +411,35 @@ def latentsync_retry_setup() -> dict[str, object]:
     return {"ok": True, "message": "setup kicked; poll /latentsync/status"}
 
 
-@app.post("/render_latentsync", dependencies=[Depends(verify_token)])
-def render_latentsync(req: LatentSyncRenderRequest) -> dict[str, object]:
-    """Run LatentSync-1.6 in its isolated venv and return a /renders/<id>.mp4 URL."""
+# In-memory job registry. LatentSync takes > Cloudflare's 100s proxy timeout
+# even on warm runs, so we can't return synchronously. Kick render in a
+# background thread; clients poll /latentsync/jobs/{job_id} for status.
+_latentsync_jobs: dict[str, dict] = {}
+_latentsync_jobs_lock = threading.Lock()
+
+
+def _do_latentsync_render(job_id: str, req: "LatentSyncRenderRequest") -> None:
+    """Background thread: runs the actual render, updates registry."""
     from renderer import latentsync_runner
+    t_start = time.time()
 
-    start = time.time()
-    job_id = hashlib.sha256(
-        f"latentsync|{req.portraitVideo}|{time.time()}".encode()
-    ).hexdigest()[:16]
-    log.info("latentsync render job=%s", job_id)
+    def set_state(**kwargs) -> None:
+        with _latentsync_jobs_lock:
+            _latentsync_jobs[job_id].update(kwargs)
 
-    with tempfile.TemporaryDirectory(prefix=f"ls-{job_id}-") as tmpdir:
-        tmp = Path(tmpdir)
-
-        # Audio
-        try:
+    try:
+        with tempfile.TemporaryDirectory(prefix=f"ls-{job_id}-") as tmpdir:
+            tmp = Path(tmpdir)
+            set_state(state="fetching_audio")
             audio_path = _resolve_audio(req.audio, tmp / "input.wav")
-        except Exception as e:  # noqa: BLE001
-            raise HTTPException(400, detail={"error": "bad_audio", "message": str(e)})
 
-        # Portrait video — always fetched, not cached (LatentSync does its own
-        # pre-processing so there's no benefit to caching the raw mp4)
-        video_path = tmp / "portrait.mp4"
-        try:
+            set_state(state="fetching_video")
+            video_path = tmp / "portrait.mp4"
             urllib.request.urlretrieve(req.portraitVideo, video_path)
-        except Exception as e:  # noqa: BLE001
-            raise HTTPException(
-                400,
-                detail={"error": "portrait_fetch_failed", "message": str(e)},
-            )
 
-        out_path = OUTPUT_DIR / f"{job_id}.mp4"
-
-        with _render_lock:
-            try:
+            out_path = OUTPUT_DIR / f"{job_id}.mp4"
+            set_state(state="rendering")
+            with _render_lock:
                 result = latentsync_runner.render(
                     video_path=video_path,
                     audio_path=audio_path,
@@ -439,35 +449,89 @@ def render_latentsync(req: LatentSyncRenderRequest) -> dict[str, object]:
                     seed=req.seed,
                     enable_deepcache=req.enableDeepcache,
                 )
-            except latentsync_runner.LatentSyncNotReady as e:
-                raise HTTPException(503, detail={"error": "not_ready", "message": str(e)})
-            except latentsync_runner.LatentSyncSetupFailed as e:
-                raise HTTPException(500, detail={"error": "setup_failed", "message": str(e)})
-            except subprocess.CalledProcessError as e:
-                raise HTTPException(
-                    500,
-                    detail={
-                        "error": "latentsync_failed",
-                        "returncode": e.returncode,
-                        "stderr_tail": (e.stderr or "")[-2000:],
-                    },
-                )
 
-    total = time.time() - start
-    base = PUBLIC_BASE_URL.rstrip("/")
-    video_url = f"{base}/renders/{out_path.name}" if base else f"/renders/{out_path.name}"
-    return {
-        "ok": True,
-        "videoUrl": video_url,
-        "metrics": {
+        total = time.time() - t_start
+        base = PUBLIC_BASE_URL.rstrip("/")
+        video_url = (
+            f"{base}/renders/{out_path.name}" if base else f"/renders/{out_path.name}"
+        )
+        set_state(
+            state="done",
+            videoUrl=video_url,
+            filename=out_path.name,
+            metrics={
+                "total_wall_sec": round(total, 2),
+                "render_sec": round(float(result["elapsed_sec"]), 2),
+                "engine": "latentsync-1.6",
+                "inference_steps": req.inferenceSteps,
+                "guidance_scale": req.guidanceScale,
+            },
+        )
+    except latentsync_runner.LatentSyncNotReady as e:
+        set_state(state="error", error="not_ready", detail=str(e))
+    except latentsync_runner.LatentSyncSetupFailed as e:
+        set_state(state="error", error="setup_failed", detail=str(e))
+    except subprocess.CalledProcessError as e:
+        set_state(
+            state="error",
+            error="latentsync_failed",
+            returncode=e.returncode,
+            stderr_tail=(e.stderr or "")[-2000:],
+        )
+    except Exception as e:  # noqa: BLE001
+        set_state(state="error", error="unknown", detail=repr(e))
+
+
+@app.post("/render_latentsync", dependencies=[Depends(verify_token)])
+def render_latentsync(req: LatentSyncRenderRequest) -> dict[str, object]:
+    """Kick a LatentSync render in the background. Returns job_id; poll /latentsync/jobs/{id}.
+
+    We don't block because Cloudflare 524s at 100s and LatentSync always
+    takes longer on the first render (model warm-up) and typically on warm
+    runs too (3D UNet, 20 diffusion steps).
+    """
+    job_id = hashlib.sha256(
+        f"latentsync|{req.portraitVideo}|{time.time()}".encode()
+    ).hexdigest()[:16]
+    log.info("latentsync render (async) job=%s", job_id)
+
+    with _latentsync_jobs_lock:
+        _latentsync_jobs[job_id] = {
             "job_id": job_id,
-            "total_wall_sec": round(total, 2),
-            "render_sec": round(float(result["elapsed_sec"]), 2),
-            "engine": "latentsync-1.6",
-            "inference_steps": req.inferenceSteps,
-            "guidance_scale": req.guidanceScale,
-        },
-    }
+            "state": "queued",
+            "submitted_at": time.time(),
+            "request": req.model_dump(),
+        }
+    threading.Thread(
+        target=_do_latentsync_render,
+        args=(job_id, req),
+        daemon=True,
+        name=f"latentsync-{job_id}",
+    ).start()
+
+    return {"ok": True, "job_id": job_id, "state": "queued"}
+
+
+@app.get("/latentsync/jobs/{job_id}")
+def latentsync_job_status(job_id: str) -> dict[str, object]:
+    with _latentsync_jobs_lock:
+        job = _latentsync_jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, detail={"error": "unknown_job", "job_id": job_id})
+    return job
+
+
+@app.get("/latentsync/jobs")
+def latentsync_jobs_list() -> dict[str, object]:
+    with _latentsync_jobs_lock:
+        return {
+            "count": len(_latentsync_jobs),
+            "jobs": sorted(
+                _latentsync_jobs.values(),
+                key=lambda j: j.get("submitted_at", 0),
+                reverse=True,
+            )[:50],
+        }
 
 
 # ---------------------------------------------------------------------------
