@@ -90,20 +90,53 @@ def assert_ready() -> None:
         )
 
 
-def _build_config(
+def _build_configs(
     *,
     image_path: Path,
     audio_path: Path,
     seed: int,
     num_frames: int,
     fp16_accel: bool,
-) -> dict:
+    tmpdir: Path,
+) -> Path:
     """
-    AniPortrait's audio2vid config format (from their
-    configs/prompts/animation_audio.yaml). We generate one per render.
+    AniPortrait's audio2vid wants TWO configs:
+      1. main config pointing at weights + test_cases
+      2. audio_inference_config defining a2m/a2p model structure + ckpts
+
+    We write both into tmpdir and return the path to the main config.
+    Their script expects `audio_inference_config` to be a path; we give it
+    the tmpdir path so our generated audio config sticks.
     """
     base = ANIPORTRAIT_REPO / "pretrained_weights"
-    return {
+
+    # Audio inference config (a2m/a2p model structure).
+    audio_cfg = {
+        "a2m_model": {
+            "out_dim": 1404,
+            "latent_dim": 512,
+            "model_path": str(base / "wav2vec2-base-960h"),
+            "only_last_fetures": True,
+            "from_pretrained": True,
+        },
+        "a2p_model": {
+            "out_dim": 6,
+            "latent_dim": 512,
+            "model_path": str(base / "wav2vec2-base-960h"),
+            "only_last_fetures": True,
+            "from_pretrained": True,
+        },
+        "pretrained_model": {
+            "a2m_ckpt": str(base / "audio2mesh.pt"),
+            "a2p_ckpt": str(base / "audio2pose.pt"),
+        },
+    }
+    audio_cfg_path = tmpdir / "audio_inference.yaml"
+    with open(audio_cfg_path, "w") as f:
+        yaml.safe_dump(audio_cfg, f)
+
+    # Main run config
+    main_cfg = {
         "pretrained_base_model_path": str(base / "stable-diffusion-v1-5"),
         "pretrained_vae_path": str(base / "sd-vae-ft-mse"),
         "image_encoder_path": str(base / "image_encoder"),
@@ -111,17 +144,20 @@ def _build_config(
         "reference_unet_path": str(base / "reference_unet.pth"),
         "pose_guider_path": str(base / "pose_guider.pth"),
         "motion_module_path": str(base / "motion_module.pth"),
-        "audio_model_path": str(base / "wav2vec2-base-960h"),
-        "audio2mesh_path": str(base / "audio2mesh.pt"),
-        "audio2pose_path": str(base / "audio2pose.pt"),
+        "audio_inference_config": str(audio_cfg_path),
         "inference_config": "./configs/inference/inference_v2.yaml",
         "weight_dtype": "fp16",
         "test_cases": {
             str(image_path): [str(audio_path)],
         },
-        "L": num_frames,   # num_frames
+        "L": num_frames,
         "seed": seed,
     }
+    main_cfg_path = tmpdir / "run.yaml"
+    with open(main_cfg_path, "w") as f:
+        yaml.safe_dump(main_cfg, f)
+
+    return main_cfg_path
 
 
 def render(
@@ -149,21 +185,18 @@ def render(
             raise FileNotFoundError(str(p))
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    config = _build_config(
-        image_path=image_path,
-        audio_path=audio_path,
-        seed=seed,
-        num_frames=num_frames,
-        fp16_accel=fp16_accel,
-    )
-
-    # Write config + run audio2vid in a temp dir so we can find the output
+    # Write configs + run audio2vid in a temp dir so we can find the output
     # (AniPortrait writes into ./output/<timestamp>/)
     with tempfile.TemporaryDirectory(prefix="ap-run-") as tmp:
         tmpdir = Path(tmp)
-        cfg_path = tmpdir / "run.yaml"
-        with open(cfg_path, "w") as f:
-            yaml.safe_dump(config, f)
+        cfg_path = _build_configs(
+            image_path=image_path,
+            audio_path=audio_path,
+            seed=seed,
+            num_frames=num_frames,
+            fp16_accel=fp16_accel,
+            tmpdir=tmpdir,
+        )
 
         cmd = [
             str(ANIPORTRAIT_VENV_PY),
