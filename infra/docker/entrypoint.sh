@@ -44,6 +44,25 @@ if [[ "${PRESENCE_ENABLE_LATENTSYNC:-0}" == "1" ]]; then
     fi
 fi
 
+# ─── AniPortrait setup (optional, run in background) ───────────────────────
+# If PRESENCE_ENABLE_ANIPORTRAIT=1, kick setup in the background (~11 GB).
+# Status visible in /aniportrait/status.
+if [[ "${PRESENCE_ENABLE_ANIPORTRAIT:-0}" == "1" ]]; then
+    AP_SENTINEL="/workspace/AniPortrait/pretrained_weights/denoising_unet.pth"
+    if [[ ! -s "${AP_SENTINEL}" ]]; then
+        echo "[edlio-presence] PRESENCE_ENABLE_ANIPORTRAIT=1 and weights missing — running setup in background (see /tmp/aniportrait-setup.log)"
+        (
+            bash /workspace/edlio-presence/infra/aniportrait/setup.sh \
+                && touch /workspace/AniPortrait/.ready \
+                || touch /workspace/AniPortrait/.failed
+        ) &
+    else
+        echo "[edlio-presence] AniPortrait weights already present — marking ready"
+        mkdir -p /workspace/AniPortrait
+        touch /workspace/AniPortrait/.ready
+    fi
+fi
+
 cd "${WORK_DIR}"
 echo "[edlio-presence] ready (cwd=$(pwd)). starting: $*"
 exec "$@"

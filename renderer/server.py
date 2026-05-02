@@ -535,6 +535,182 @@ def latentsync_jobs_list() -> dict[str, object]:
 
 
 # ---------------------------------------------------------------------------
+# /render_aniportrait  —  alt renderer: Tencent AniPortrait (image→video,
+#                       pure synthesis of head motion + lip from a still)
+# ---------------------------------------------------------------------------
+# Same async pattern as LatentSync because diffusion renders take minutes.
+
+class AniPortraitRenderRequest(BaseModel):
+    image: str = Field(
+        ...,
+        description=(
+            "Reference portrait image URL. Should be square, face 50-70% of "
+            "frame, facing forward (<30° rotation)."
+        ),
+    )
+    audio: str = Field(..., description="Audio URL or base64. English only per their training.")
+    width: int = Field(default=512, ge=256, le=1024)
+    height: int = Field(default=512, ge=256, le=1024)
+    numFrames: int = Field(default=200, ge=25, le=600, description="Clip length in frames at 25fps.")
+    seed: int = Field(default=42)
+    fp16Accel: bool = Field(default=True, description="Use film_net frame-interpolation for speed.")
+
+
+@app.get("/aniportrait/status")
+def aniportrait_status() -> dict[str, object]:
+    from renderer import aniportrait_runner
+    st = aniportrait_runner.status()
+    log_tail = ""
+    try:
+        log_tail = Path("/tmp/aniportrait-setup.log").read_text()[-2000:]
+    except Exception:  # noqa: BLE001
+        pass
+    return {**st, "log_tail": log_tail}
+
+
+@app.post("/aniportrait/retry_setup", dependencies=[Depends(verify_token)])
+def aniportrait_retry_setup() -> dict[str, object]:
+    from renderer import aniportrait_runner
+    for sentinel in (aniportrait_runner.ANIPORTRAIT_READY_SENTINEL, aniportrait_runner.ANIPORTRAIT_FAILED_SENTINEL):
+        try:
+            sentinel.unlink(missing_ok=True)
+        except Exception as e:  # noqa: BLE001
+            log.warning("unlink %s: %s", sentinel, e)
+    subprocess.Popen(
+        [
+            "bash", "-c",
+            "bash /workspace/edlio-presence/infra/aniportrait/setup.sh "
+            "&& touch /workspace/AniPortrait/.ready "
+            "|| touch /workspace/AniPortrait/.failed",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    return {"ok": True, "message": "setup kicked; poll /aniportrait/status"}
+
+
+_aniportrait_jobs: dict[str, dict] = {}
+_aniportrait_jobs_lock = threading.Lock()
+
+
+def _do_aniportrait_render(job_id: str, req: "AniPortraitRenderRequest") -> None:
+    from renderer import aniportrait_runner
+    t_start = time.time()
+
+    def set_state(**kwargs) -> None:
+        with _aniportrait_jobs_lock:
+            _aniportrait_jobs[job_id].update(kwargs)
+
+    try:
+        with tempfile.TemporaryDirectory(prefix=f"ap-{job_id}-") as tmpdir:
+            tmp = Path(tmpdir)
+            set_state(state="fetching_audio")
+            audio_path = _resolve_audio(req.audio, tmp / "input.wav")
+
+            set_state(state="fetching_image")
+            image_path = tmp / "portrait.png"
+            urllib.request.urlretrieve(req.image, image_path)
+
+            out_path = OUTPUT_DIR / f"{job_id}.mp4"
+            set_state(state="rendering")
+            with _render_lock:
+                result = aniportrait_runner.render(
+                    image_path=image_path,
+                    audio_path=audio_path,
+                    output_path=out_path,
+                    width=req.width,
+                    height=req.height,
+                    num_frames=req.numFrames,
+                    seed=req.seed,
+                    fp16_accel=req.fp16Accel,
+                )
+
+        total = time.time() - t_start
+        base = PUBLIC_BASE_URL.rstrip("/")
+        video_url = (
+            f"{base}/renders/{out_path.name}" if base else f"/renders/{out_path.name}"
+        )
+        set_state(
+            state="done",
+            videoUrl=video_url,
+            filename=out_path.name,
+            metrics={
+                "total_wall_sec": round(total, 2),
+                "render_sec": round(float(result["elapsed_sec"]), 2),
+                "engine": "aniportrait",
+                "width": req.width,
+                "height": req.height,
+                "num_frames": req.numFrames,
+            },
+        )
+    except aniportrait_runner.AniPortraitNotReady as e:
+        set_state(state="error", error="not_ready", detail=str(e))
+    except aniportrait_runner.AniPortraitSetupFailed as e:
+        set_state(state="error", error="setup_failed", detail=str(e))
+    except subprocess.CalledProcessError as e:
+        set_state(
+            state="error",
+            error="aniportrait_failed",
+            returncode=e.returncode,
+            stderr_tail=(e.stderr or "")[-2000:],
+        )
+    except Exception as e:  # noqa: BLE001
+        set_state(state="error", error="unknown", detail=repr(e))
+
+
+@app.post("/render_aniportrait", dependencies=[Depends(verify_token)])
+def render_aniportrait(req: AniPortraitRenderRequest) -> dict[str, object]:
+    """Kick an AniPortrait render in the background. Returns job_id; poll /aniportrait/jobs/{id}.
+
+    Same async contract as /render_latentsync — diffusion renders take
+    longer than Cloudflare's 100s proxy timeout.
+    """
+    job_id = hashlib.sha256(
+        f"aniportrait|{req.image}|{time.time()}".encode()
+    ).hexdigest()[:16]
+    log.info("aniportrait render (async) job=%s", job_id)
+
+    with _aniportrait_jobs_lock:
+        _aniportrait_jobs[job_id] = {
+            "job_id": job_id,
+            "state": "queued",
+            "submitted_at": time.time(),
+            "request": req.model_dump(),
+        }
+    threading.Thread(
+        target=_do_aniportrait_render,
+        args=(job_id, req),
+        daemon=True,
+        name=f"aniportrait-{job_id}",
+    ).start()
+
+    return {"ok": True, "job_id": job_id, "state": "queued"}
+
+
+@app.get("/aniportrait/jobs/{job_id}")
+def aniportrait_job_status(job_id: str) -> dict[str, object]:
+    with _aniportrait_jobs_lock:
+        job = _aniportrait_jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, detail={"error": "unknown_job", "job_id": job_id})
+    return job
+
+
+@app.get("/aniportrait/jobs")
+def aniportrait_jobs_list() -> dict[str, object]:
+    with _aniportrait_jobs_lock:
+        return {
+            "count": len(_aniportrait_jobs),
+            "jobs": sorted(
+                _aniportrait_jobs.values(),
+                key=lambda j: j.get("submitted_at", 0),
+                reverse=True,
+            )[:50],
+        }
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 def _resolve_audio(audio: str, dst: Path) -> Path:
