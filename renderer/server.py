@@ -608,8 +608,38 @@ def aniportrait_fixup() -> dict[str, object]:
     # 1. Symlink
     link = repo / "pretrained_model"
     target = repo / "pretrained_weights"
+    # Log the exact state. Symlink can exist but be broken.
+    link_status = {
+        "path": str(link),
+        "is_symlink": link.is_symlink(),
+        "exists": link.exists(),
+        "readlink": None,
+        "film_net_via_link": None,
+    }
+    if link.is_symlink():
+        try:
+            link_status["readlink"] = os.readlink(str(link))
+        except Exception as e:  # noqa: BLE001
+            link_status["readlink"] = f"err: {e}"
+        # Check if film_net accessible through the link
+        film_via_link = link / "film_net_fp16.pt"
+        link_status["film_net_via_link"] = {
+            "path": str(film_via_link),
+            "exists": film_via_link.exists(),
+        }
+
     if link.exists() or link.is_symlink():
-        report["symlink"] = "already exists"
+        # Recreate if broken
+        if link.is_symlink() and not link.exists():
+            log.warning("symlink is broken, recreating")
+            link.unlink()
+            if target.exists():
+                os.symlink("pretrained_weights", str(link))
+                report["symlink"] = "broken → recreated"
+            else:
+                report["symlink"] = "broken, target missing"
+        else:
+            report["symlink"] = "already exists"
     elif target.exists():
         try:
             os.symlink("pretrained_weights", str(link))
@@ -618,6 +648,8 @@ def aniportrait_fixup() -> dict[str, object]:
             report["symlink"] = f"failed: {e}"
     else:
         report["symlink"] = f"target {target} missing"
+
+    report["_symlink_debug"] = link_status
 
     # 2. Downgrade setuptools inside aniportrait venv
     vpip = "/opt/aniportrait-venv/bin/pip"
