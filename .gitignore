@@ -9,3 +9,8 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+
+# Large raw portrait captures — stored in Supabase, not git
+assets/portraits/*.mov
+assets/portraits/*.MOV
+assets/portraits/*.mp4
