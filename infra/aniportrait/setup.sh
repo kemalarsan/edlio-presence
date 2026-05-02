@@ -205,8 +205,12 @@ PY
 #   - frame_interpolation.py hard-codes ./pretrained_model/film_net_fp16.pt
 # We download to pretrained_weights/ (per README) and symlink pretrained_model
 # to it so hard-coded paths resolve.
-if [[ ! -e "$REPO_DIR/pretrained_model" ]]; then
-    log "symlinking pretrained_model → pretrained_weights (their code has both names)"
+# If pretrained_model is a real directory, bail early — we'd rather /fixup
+# migrate it than clobber state silently.
+if [[ -d "$REPO_DIR/pretrained_model" && ! -L "$REPO_DIR/pretrained_model" ]]; then
+    log "WARN: pretrained_model is a real directory, leaving it; /aniportrait/fixup will migrate"
+elif [[ ! -e "$REPO_DIR/pretrained_model" ]]; then
+    log "symlinking pretrained_model → pretrained_weights (their code uses both names)"
     (cd "$REPO_DIR" && ln -s pretrained_weights pretrained_model) >>"$LOG" 2>&1
 fi
 

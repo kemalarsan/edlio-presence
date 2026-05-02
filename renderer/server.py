@@ -629,7 +629,11 @@ def aniportrait_fixup() -> dict[str, object]:
         }
 
     if link.exists() or link.is_symlink():
-        # Recreate if broken
+        # Four cases:
+        #   1. symlink exists and resolves → OK
+        #   2. symlink exists but broken → recreate
+        #   3. real directory exists (not symlink) → move contents to target, replace with symlink
+        #   4. real file exists → fail loudly
         if link.is_symlink() and not link.exists():
             log.warning("symlink is broken, recreating")
             link.unlink()
@@ -638,8 +642,28 @@ def aniportrait_fixup() -> dict[str, object]:
                 report["symlink"] = "broken → recreated"
             else:
                 report["symlink"] = "broken, target missing"
+        elif not link.is_symlink() and link.is_dir():
+            log.warning("pretrained_model is a real dir not symlink, migrating")
+            # Move any files from real dir into target (pretrained_weights),
+            # then delete the dir and replace with symlink.
+            import shutil
+            moved = []
+            target.mkdir(parents=True, exist_ok=True)
+            for entry in link.iterdir():
+                dst = target / entry.name
+                if dst.exists():
+                    # don't clobber
+                    continue
+                shutil.move(str(entry), str(dst))
+                moved.append(entry.name)
+            try:
+                link.rmdir()
+                os.symlink("pretrained_weights", str(link))
+                report["symlink"] = f"real-dir → symlink (migrated: {moved})"
+            except Exception as e:  # noqa: BLE001
+                report["symlink"] = f"migration failed: {e}"
         else:
-            report["symlink"] = "already exists"
+            report["symlink"] = "already exists (symlink)"
     elif target.exists():
         try:
             os.symlink("pretrained_weights", str(link))
