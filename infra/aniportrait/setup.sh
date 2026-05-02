@@ -105,16 +105,21 @@ for f in "${ANI_FILES[@]}"; do
 done
 if [[ "$NEED_ANI_DOWNLOAD" == "1" ]]; then
     log "downloading AniPortrait checkpoints from ZJYang/AniPortrait (~5 GB, 2-5 min)"
-    "$VPY" - <<PY >>"$LOG" 2>&1
+    # Quoted heredoc so bash doesn't interpolate — the earlier unquoted
+    # version injected garbage that gave Python a SyntaxError on the
+    # FIRST line and all downloads silently failed. (film_net_fp16.pt
+    # was the only missing one; other files predated setup.sh edits.)
+    WEIGHTS_DIR_ESC="$WEIGHTS_DIR" "$VPY" - <<'PY' >>"$LOG" 2>&1
+import os
 from huggingface_hub import hf_hub_download
-files = ${ANI_FILES[@]@Q}  # unused in python, but kept for logging
 files = ["denoising_unet.pth", "reference_unet.pth", "pose_guider.pth",
          "motion_module.pth", "audio2mesh.pt", "audio2pose.pt", "film_net_fp16.pt"]
+local_dir = os.environ["WEIGHTS_DIR_ESC"]
 for fn in files:
     path = hf_hub_download(
         repo_id="ZJYang/AniPortrait",
         filename=fn,
-        local_dir="${WEIGHTS_DIR}",
+        local_dir=local_dir,
     )
     print(f"downloaded: {path}")
 PY

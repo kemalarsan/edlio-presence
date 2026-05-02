@@ -647,6 +647,32 @@ def aniportrait_fixup() -> dict[str, object]:
     except Exception as e:  # noqa: BLE001
         report["pkg_resources"] = f"failed: {e}"
 
+    # 4. Download film_net_fp16.pt if missing (heredoc bug in early
+    #    setup.sh made this silently skip; we patch in-place)
+    weights_dir = repo / "pretrained_weights"
+    film_net = weights_dir / "film_net_fp16.pt"
+    if film_net.is_file() and film_net.stat().st_size > 1_000_000:
+        report["film_net_fp16"] = f"present ({film_net.stat().st_size} bytes)"
+    else:
+        try:
+            proc = subprocess.run(
+                [
+                    "/opt/aniportrait-venv/bin/python", "-c",
+                    f"from huggingface_hub import hf_hub_download; "
+                    f"p = hf_hub_download(repo_id='ZJYang/AniPortrait', "
+                    f"filename='film_net_fp16.pt', local_dir='{weights_dir}'); "
+                    f"print(p)"
+                ],
+                capture_output=True, text=True, timeout=180,
+            )
+            report["film_net_fp16"] = {
+                "returncode": proc.returncode,
+                "stdout": (proc.stdout or "").strip(),
+                "stderr": (proc.stderr or "").strip()[-500:],
+            }
+        except Exception as e:  # noqa: BLE001
+            report["film_net_fp16"] = f"failed: {e}"
+
     return {"ok": True, "fixup": report}
 
 
